@@ -3,6 +3,7 @@ mod error;
 mod model;
 mod repo;
 mod store;
+mod trace;
 
 use error::{Error, Result};
 use std::path::PathBuf;
@@ -71,8 +72,12 @@ fn run() -> Result<serde_json::Value> {
 }
 
 fn main() -> ExitCode {
+    trace::init();
     repo::prepare_environment();
-    match run() {
+    trace::point("environment");
+    let result = run();
+    trace::point("done");
+    match result {
         Ok(mut value) => {
             value["ok"] = true.into();
             println!("{value}");

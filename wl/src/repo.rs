@@ -17,6 +17,7 @@ pub fn prepare_environment() {
         let Some(cache) = std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("wl").join("git-root")) else { return };
         let usable = |root: &Path| ["clangarm64", "ucrt64", "mingw64", "mingw32"].iter().filter(|c| root.join(c).is_dir()).count() == 1;
         let cached = std::fs::read_to_string(&cache).ok().map(|s| PathBuf::from(s.trim())).filter(|r| usable(r));
+        crate::trace::point(if cached.is_some() { "git root from cache" } else { "git root not cached" });
         let root = cached.or_else(|| {
             let exec_path = Command::new("git").arg("--exec-path").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
             let exec_path = PathBuf::from(String::from_utf8(exec_path.stdout).ok()?.trim());
@@ -47,7 +48,9 @@ pub fn open(path: &Path) -> Result<gix::Repository> {
         env: false,
         includes: true,
     };
-    Ok(gix::open_opts(path, gix::open::Options::default().permissions(permissions))?)
+    let repo = gix::open_opts(path, gix::open::Options::default().permissions(permissions))?;
+    crate::trace::point("open");
+    Ok(repo)
 }
 
 pub struct Layout {
@@ -85,6 +88,7 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
     if SET_EXEPATH.load(Ordering::Relaxed) {
         command.env_remove("EXEPATH");
     }
+    crate::trace::point(&format!("git {} start", args.first().unwrap_or(&"")));
     let output = command
         .output()
         .map_err(|e| Error::new(format!("cannot start git: {e}")))?;

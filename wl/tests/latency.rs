@@ -23,6 +23,11 @@ fn timed(repo: &Path, args: &[&str]) -> (f64, Value) {
     (ms, value)
 }
 
+fn trace(repo: &Path, args: &[&str]) {
+    let out = Command::new(env!("CARGO_BIN_EXE_wl")).arg("--repo").arg(repo).args(args).env("WL_TRACE", "1").output().unwrap();
+    println!("trace {args:?}\n{}", String::from_utf8_lossy(&out.stderr));
+}
+
 fn p90(name: &str, mut samples: Vec<f64>) -> f64 {
     samples.sort_by(f64::total_cmp);
     let p90 = samples[((samples.len() - 1) as f64 * 0.9).round() as usize];
@@ -66,6 +71,11 @@ fn foreground_commands_stay_under_the_latency_limit() {
         hold.push(timed(&main, &["hold", "first", "--reason", "x"]).0);
         hold.push(timed(&main, &["release-hold", "first", "--decision", "y"]).0);
     }
+    for args in [&["status"][..], &["hold", "first", "--reason", "x"], &["release-hold", "first", "--decision", "y"]] {
+        trace(&main, args);
+    }
+    wait_for_free_slot(&main);
+    trace(&main, &["begin", "traced", "--request", "r"]);
     let worst = [p90("begin", begin), p90("status", status), p90("hold_and_release", hold)];
     assert!(worst.iter().all(|&p| p <= LIMIT_MS), "p90 above {LIMIT_MS} ms: {worst:?}");
 }

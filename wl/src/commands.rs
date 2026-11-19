@@ -147,11 +147,13 @@ pub fn begin(path: &Path, mut args: Args) -> Result<Value> {
             n
         }
     };
+    crate::trace::point("slot claimed");
     let worktree = ws.ensure_slot_checkout(slot, base)?;
     switch_slot(&worktree, &record.branch, base)?;
     record.stage = TaskStage::Ready;
     Store::write_json(&task_path, &record)?;
 
+    crate::trace::point("task ready");
     if ws.free_slots()?.is_empty() {
         spawn_detached(&ws.layout.main_worktree, &["__prepare-slot"]);
     }
@@ -166,12 +168,16 @@ fn switch_slot(worktree: &Path, branch: &str, base: gix::ObjectId) -> Result<()>
     if head.referent_name().is_some_and(|name| name.as_bstr() == format!("refs/heads/{branch}").as_str()) {
         return Ok(());
     }
-    if slot.is_dirty()? {
+    let dirty = slot.is_dirty()?;
+    crate::trace::point("slot dirty check");
+    if dirty {
         return Err(Error::new(format!("slot {} has uncommitted changes", worktree.display())));
     }
     let branch_exists = slot.try_find_reference(format!("refs/heads/{branch}").as_str())?.is_some();
     if !branch_exists && head.id().map(|id| id.detach()) == Some(base) {
-        return repo::start_branch_in_place(&slot, branch, base);
+        let moved = repo::start_branch_in_place(&slot, branch, base);
+        crate::trace::point("refs moved in place");
+        return moved;
     }
     if branch_exists {
         repo::git(worktree, &["switch", "--quiet", branch])?;
