@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 /// ADR 0008: p90 50 ms on the Windows controller. Runner VMs differ by about 2x in speed, so CI compares
 /// each command scaled to a machine whose process start through pipes takes REFERENCE_START_MS, the fast
 /// runners' baseline; a faster machine is not scaled up. The controller measurement in P6 is the acceptance;
-/// this gate catches regressions.
+/// CI runs this in a job that is not required, because commands that open the repository with gix still vary
+/// by 25-75 ms outside wl's own work on the runners (Issue #1).
 const LIMIT_MS: f64 = 50.0;
 const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
 /// Decides like the real preflight: the destination is the upstream's branch on origin, else the current branch.
