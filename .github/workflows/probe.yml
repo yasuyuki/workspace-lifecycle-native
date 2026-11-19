@@ -30,7 +30,7 @@ jobs:
       - name: measure
         run: |
           set -o pipefail
-          P=probe/target/release/probe; [ -f "$P.exe" ] && P="$P.exe"
+          P=target/release/probe; [ -f "$P.exe" ] && P="$P.exe"
           G=$(command -v git)
           {
             echo "{\"os\":\"${{ matrix.os }}\",\"git\":\"$G\"}"
@@ -58,6 +58,8 @@ jobs:
             for i in $(seq 0 9); do git -C synth branch -q b$i HEAD; done
             $P spawn git_branch_create 10 git -C synth branch -q c{i} HEAD
             $P spawn bash_noop 10 bash -c true
+            git config --show-origin --show-scope --list | grep -i -E 'autocrlf|include|user\.|core\.' || true
+            for i in 1 2 3; do for on in none system git user env includes system,git,user,includes system,git,user,env,includes; do $P gix-perm wl $on; done; done
             for i in 1 2 3; do $P gix-phases wl; $P gix-phases wl isolated; $P gix-phases big; done
             $P gix wl 50
             $P gix big 20

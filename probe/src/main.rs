@@ -86,6 +86,27 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Some("gix-perm") => {
+            let on: Vec<&str> = args[2].split(',').collect();
+            let mut permissions = gix::open::Permissions::default();
+            permissions.config = gix::open::permissions::Config {
+                git_binary: on.contains(&"git_binary"),
+                system: on.contains(&"system"),
+                git: on.contains(&"git"),
+                user: on.contains(&"user"),
+                env: on.contains(&"env"),
+                includes: on.contains(&"includes"),
+            };
+            let t = Instant::now();
+            let repo = gix::open_opts(&args[1], gix::open::Options::default().permissions(permissions)).unwrap();
+            let open = t.elapsed().as_secs_f64() * 1e3;
+            let t = Instant::now();
+            repo.is_dirty().unwrap();
+            let dirty = t.elapsed().as_secs_f64() * 1e3;
+            let autocrlf = repo.config_snapshot().string("core.autocrlf").map(|v| v.to_string());
+            println!("{{\"case\":\"gix_perm\",\"on\":{:?},\"open_ms\":{open:.2},\"dirty_ms\":{dirty:.2},\"autocrlf\":{:?}}}", args[2], format!("{autocrlf:?}"));
+            ExitCode::SUCCESS
+        }
         Some("gix-once") => match read_repo(&args[1]) {
             Ok(_) => ExitCode::SUCCESS,
             Err(e) => { eprintln!("{e}"); ExitCode::FAILURE }
