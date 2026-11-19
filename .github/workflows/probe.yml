@@ -7,7 +7,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -48,6 +48,7 @@ jobs:
             $P spawn probe_gix_once_big 20 $P gix-once big
             $P spawn probe_gix_once_no_git_binary_small 50 $P gix-once-no-git-binary wl
             $P spawn probe_gix_once_no_git_binary_big 20 $P gix-once-no-git-binary big
+            for i in 1 2 3; do $P gix-phases wl; $P gix-phases wl isolated; $P gix-phases big; done
             $P gix wl 50
             $P gix big 20
           } 2>&1 | tee results-${{ matrix.os }}.jsonl

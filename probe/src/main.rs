@@ -62,6 +62,29 @@ fn main() -> ExitCode {
             Ok(_) => ExitCode::SUCCESS,
             Err(e) => { eprintln!("{e}"); ExitCode::FAILURE }
         },
+        Some("gix-phases") => {
+            let isolated = args.get(2).map(String::as_str) == Some("isolated");
+            for round in 0..2 {
+                let t = Instant::now();
+                let repo = if isolated {
+                    gix::open_opts(&args[1], gix::open::Options::isolated()).unwrap()
+                } else {
+                    gix::open(&args[1]).unwrap()
+                };
+                let open = t.elapsed().as_secs_f64() * 1e3;
+                let t = Instant::now();
+                repo.head_id().unwrap();
+                let head = t.elapsed().as_secs_f64() * 1e3;
+                let t = Instant::now();
+                repo.is_dirty().unwrap();
+                let dirty = t.elapsed().as_secs_f64() * 1e3;
+                let t = Instant::now();
+                repo.worktrees().unwrap();
+                let wt = t.elapsed().as_secs_f64() * 1e3;
+                println!("{{\"case\":\"gix_phases\",\"isolated\":{isolated},\"round\":{round},\"open_ms\":{open:.2},\"head_ms\":{head:.2},\"dirty_ms\":{dirty:.2},\"worktrees_ms\":{wt:.2}}}");
+            }
+            ExitCode::SUCCESS
+        }
         Some("gix-once") => match read_repo(&args[1]) {
             Ok(_) => ExitCode::SUCCESS,
             Err(e) => { eprintln!("{e}"); ExitCode::FAILURE }
