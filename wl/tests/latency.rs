@@ -63,7 +63,14 @@ fn foreground_commands_stay_under_the_latency_limit() {
     let mut begin = Vec::new();
     for i in 0..10 {
         wait_for_free_slot(&main);
-        begin.push(timed(&main, &["begin", &format!("t{i}"), "--request", "r"]).0);
+        let start = Instant::now();
+        let out = Command::new(env!("CARGO_BIN_EXE_wl")).arg("--repo").arg(&main)
+            .args(["begin", &format!("t{i}"), "--request", "r"]).env("WL_TRACE", "1").output().unwrap();
+        let ms = start.elapsed().as_secs_f64() * 1e3;
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+        let inner = String::from_utf8_lossy(&out.stderr);
+        println!("begin t{i} wall {ms:.2} ms; {}", inner.lines().map(str::trim).collect::<Vec<_>>().join(" | "));
+        begin.push(ms);
     }
     wait_for_free_slot(&main);
     let baseline: Vec<f64> = (0..30).map(|_| {
