@@ -61,7 +61,12 @@ impl Workspace {
                 return Ok(n);
             }
         }
-        let mut n = slots.iter().chain(&claims).max().map_or(1, |m| m + 1);
+        self.claim_new_slot(owner)
+    }
+
+    /// Claims a slot number that has no checkout yet.
+    fn claim_new_slot(&self, owner: &str) -> Result<u32> {
+        let mut n = self.slot_numbers(".json")?.iter().chain(&self.slot_numbers(".claim")?).max().map_or(1, |m| m + 1);
         while !Store::create_new(&self.store.claim(n), owner.as_bytes())? {
             n += 1;
         }
@@ -308,7 +313,7 @@ pub fn prepare_slot(path: &Path, args: Args) -> Result<Value> {
             return Ok(json!({ "slot": n, "advanced": moved, "fetched": fetched }));
         }
     }
-    let n = ws.claim_slot(PREPARING)?;
+    let n = ws.claim_new_slot(PREPARING)?;
     let created = ws.ensure_slot_checkout(n, base);
     if let Ok(worktree) = &created {
         settle_index(worktree);
