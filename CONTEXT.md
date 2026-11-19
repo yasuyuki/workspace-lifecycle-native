@@ -39,3 +39,11 @@ _Avoid_: task checkout、lease
 **Offload declaration**:
 repository が validation の各手順に付ける、実行場所の宣言。`windows` か `any` のどちらかで、宣言が無い手順は `windows` として扱う。`any` の手順は WSL offload で走る。
 _Avoid_: 自動判定、platform 推定
+
+**Validation declaration**:
+repository が管理下の file に書く validation の手順と、各手順の offload declaration。worker は、確定した commit に含まれる版を使う。task はこれを差し替えられない。
+_Avoid_: validation argv、task の validator
+
+**Needs-action**:
+worker が自力で進められなくなった finish の状態。統合先を元に戻し、理由を記録して止まる。修正 commit を積んで finish を呼び直すと、そこから再開する。
+_Avoid_: 失敗、待機、pending
