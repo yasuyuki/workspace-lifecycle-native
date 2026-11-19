@@ -15,7 +15,7 @@ struct Workspace {
 
 impl Workspace {
     fn open(path: &Path) -> Result<Self> {
-        let repo = repo::open(path)?;
+        let repo = repo::open_refs_only(path)?;
         let layout = repo::layout(&repo)?;
         let store = Store::new(&layout.common_dir);
         Ok(Self { repo, layout, store })
@@ -83,10 +83,7 @@ impl Workspace {
     }
 
     fn report(&self, record: &TaskRecord) -> Result<Value> {
-        let worktree = match record.slot {
-            Some(n) => Some(self.slot_path(n)?),
-            None => None,
-        };
+        let worktree = self.slot_path(record.slot)?;
         let hold = Store::read_json::<HoldRecord>(&self.store.hold(record.task.as_str()))?.map(|h| h.reason);
         Ok(json!({
             "task": record.task,
@@ -113,42 +110,38 @@ pub fn begin(path: &Path, mut args: Args) -> Result<Value> {
     gix::refs::FullName::try_from(format!("refs/heads/{branch}"))?;
 
     let ws = Workspace::open(path)?;
-    let base = repo::resolve_base(&ws.repo, base_spec.as_deref())?;
     let task_path = ws.store.task(task.as_str());
-    let fresh = TaskRecord {
-        version: VERSION,
-        task: task.clone(),
-        request,
-        branch,
-        base: base.to_string(),
-        slot: None,
-        stage: TaskStage::Claimed,
-    };
-    let mut record = if Store::create_new_json(&task_path, &fresh)? {
-        fresh
-    } else {
-        let existing = ws.task(&task)?;
-        if existing.request != fresh.request || existing.branch != fresh.branch {
-            return Err(Error::new(format!("task {task} already exists with another request or branch")));
+    let mut record = match Store::read_json::<TaskRecord>(&task_path)? {
+        Some(existing) => existing,
+        None => {
+            let base = repo::resolve_base(&ws.repo, base_spec.as_deref())?;
+            // A begin of the same task finds the claim it or an earlier attempt made, so both use one slot.
+            let slot = ws.claim_slot(task.as_str())?;
+            let fresh = TaskRecord {
+                version: VERSION,
+                task: task.clone(),
+                request: request.clone(),
+                branch: branch.clone(),
+                base: base.to_string(),
+                slot,
+                stage: TaskStage::Claimed,
+            };
+            if Store::create_new_json(&task_path, &fresh)? {
+                fresh
+            } else {
+                Store::read_json(&task_path)?.ok_or_else(|| Error::new(format!("task {task} is being created by another begin")))?
+            }
         }
-        existing
     };
+    if record.request != request || record.branch != branch {
+        return Err(Error::new(format!("task {task} already exists with another request or branch")));
+    }
     if record.stage == TaskStage::Ready {
         return ws.report(&record);
     }
     let base: gix::ObjectId = record.base.parse().map_err(|e| Error::new(format!("recorded base: {e}")))?;
-
-    let slot = match record.slot {
-        Some(n) => n,
-        None => {
-            let n = ws.claim_slot(task.as_str())?;
-            record.slot = Some(n);
-            Store::write_json(&task_path, &record)?;
-            n
-        }
-    };
     crate::trace::point("slot claimed");
-    let worktree = ws.ensure_slot_checkout(slot, base)?;
+    let worktree = ws.ensure_slot_checkout(record.slot, base)?;
     switch_slot(&worktree, &record.branch, base)?;
     record.stage = TaskStage::Ready;
     Store::write_json(&task_path, &record)?;
@@ -200,7 +193,8 @@ pub fn retire(path: &Path, mut args: Args) -> Result<Value> {
     if Store::read_json::<HoldRecord>(&ws.store.hold(task.as_str()))?.is_some() {
         return Err(Error::new(format!("task {task} is held; release the hold first")));
     }
-    if let Some(n) = record.slot {
+    {
+        let n = record.slot;
         let worktree = ws.slot_path(n)?;
         if worktree.join(".git").exists() {
             let untracked_or_changed = repo::git(&worktree, &["status", "--porcelain", "--untracked-files=all"])?;
@@ -223,8 +217,6 @@ pub fn retire(path: &Path, mut args: Args) -> Result<Value> {
         if Store::read_text(&ws.store.claim(n))?.as_deref() == Some(task.as_str()) {
             Store::remove(&ws.store.claim(n))?;
         }
-    } else {
-        Store::remove(&task_path)?;
     }
     spawn_detached(&ws.layout.main_worktree, &["__prepare-slot"]);
     Ok(json!({ "task": task, "retired": true }))
@@ -232,6 +224,7 @@ pub fn retire(path: &Path, mut args: Args) -> Result<Value> {
 
 pub fn status(path: &Path, mut args: Args) -> Result<Value> {
     let only = args.optional_positional().map(TaskName::try_from).transpose().map_err(Error::new)?;
+    let only_requested = only.is_some();
     args.finish()?;
     let ws = Workspace::open(path)?;
     let names = match only {
@@ -242,7 +235,14 @@ pub fn status(path: &Path, mut args: Args) -> Result<Value> {
             .filter_map(|n| TaskName::try_from(n).ok())
             .collect(),
     };
-    let tasks = names.iter().map(|t| ws.task(t).and_then(|r| ws.report(&r))).collect::<Result<Vec<_>>>()?;
+    let mut tasks = Vec::new();
+    for name in &names {
+        match Store::read_json::<TaskRecord>(&ws.store.task(name.as_str()))? {
+            Some(record) => tasks.push(ws.report(&record)?),
+            None if only_requested => return Err(Error::new(format!("no task {name}"))),
+            None => {}
+        }
+    }
     let total = ws.slot_numbers(".json")?.len();
     let background = background_running(&ws.store.prepare_lock());
     Ok(json!({ "tasks": tasks, "slots": { "total": total, "free": ws.free_slots()?.len() }, "background": background }))

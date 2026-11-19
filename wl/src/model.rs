@@ -46,7 +46,7 @@ pub struct TaskRecord {
     pub request: String,
     pub branch: String,
     pub base: String,
-    pub slot: Option<u32>,
+    pub slot: u32,
     pub stage: TaskStage,
 }
 

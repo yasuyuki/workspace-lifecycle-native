@@ -25,6 +25,8 @@ impl Store {
 
     pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
         match fs::read(path) {
+            // A file created in one step can be read before its content is written: it is still being created.
+            Ok(bytes) if bytes.is_empty() => Ok(None),
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .map(Some)
                 .map_err(|e| Error::new(format!("unreadable state {}: {e}", path.display()))),
@@ -77,14 +79,21 @@ impl Store {
     }
 
     /// Creates `path` with `bytes` only if it does not exist yet. Returns false when it already exists.
+    /// A reader may see the file empty until its content is written; `read_json` treats that as absent.
     pub fn create_new(path: &Path, bytes: &[u8]) -> Result<bool> {
-        let temp = Self::temp_beside(path, bytes)?;
-        let linked = fs::hard_link(&temp, path);
-        let _ = fs::remove_file(&temp);
-        match linked {
-            Ok(()) => Ok(true),
+        let open = || fs::OpenOptions::new().write(true).create_new(true).open(path);
+        let mut file = match open() {
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                let dir = path.parent().expect("state paths have a parent");
+                fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
+                open()
+            }
+            other => other,
+        };
+        match &mut file {
+            Ok(file) => file.write_all(bytes).map(|_| true).map_err(|e| Error::io(path, e)),
             Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
-            Err(e) => Err(Error::io(path, e)),
+            Err(e) => Err(Error::new(format!("{}: {e}", path.display()))),
         }
     }
 

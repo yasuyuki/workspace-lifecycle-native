@@ -24,8 +24,12 @@ fn timed(repo: &Path, args: &[&str]) -> (f64, Value) {
 }
 
 fn trace(repo: &Path, args: &[&str]) {
+    let start = Instant::now();
     let out = Command::new(env!("CARGO_BIN_EXE_wl")).arg("--repo").arg(repo).args(args).env("WL_TRACE", "1").output().unwrap();
-    println!("trace {args:?}\n{}", String::from_utf8_lossy(&out.stderr));
+    let ms = start.elapsed().as_secs_f64() * 1e3;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    let inner = String::from_utf8_lossy(&out.stderr);
+    println!("trace {args:?} wall {ms:.2} ms; {}", inner.lines().map(str::trim).collect::<Vec<_>>().join(" | "));
 }
 
 fn p90(name: &str, mut samples: Vec<f64>) -> f64 {
@@ -80,17 +84,15 @@ fn foreground_commands_stay_under_the_latency_limit() {
     wait_for_free_slot(&main);
     timed(&main, &["retire", "warm"]);
     let mut begin = Vec::new();
-    for i in 0..30 {
+    for i in 0..35 {
         wait_until_quiet(&main);
-        let start = Instant::now();
-        let out = Command::new(env!("CARGO_BIN_EXE_wl")).arg("--repo").arg(&main)
-            .args(["begin", &format!("t{i}"), "--request", "r"]).env("WL_TRACE", "1").output().unwrap();
-        let ms = start.elapsed().as_secs_f64() * 1e3;
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
-        let inner = String::from_utf8_lossy(&out.stderr);
-        println!("begin t{i} wall {ms:.2} ms; {}", inner.lines().map(str::trim).collect::<Vec<_>>().join(" | "));
-        begin.push(ms);
-        timed(&main, &["retire", &format!("t{i}")]);
+        let name = format!("t{i}");
+        if i < 30 {
+            begin.push(timed(&main, &["begin", &name, "--request", "r"]).0);
+        } else {
+            trace(&main, &["begin", &name, "--request", "r"]);
+        }
+        timed(&main, &["retire", &name]);
     }
     wait_until_quiet(&main);
     let baseline: Vec<f64> = (0..30).map(|_| {
@@ -108,8 +110,6 @@ fn foreground_commands_stay_under_the_latency_limit() {
     for args in [&["status"][..], &["hold", "first", "--reason", "x"], &["release-hold", "first", "--decision", "y"]] {
         trace(&main, args);
     }
-    wait_for_free_slot(&main);
-    trace(&main, &["begin", "traced", "--request", "r"]);
     let slots = timed(&main, &["status"]).1["slots"]["total"].as_u64().unwrap();
     assert!(slots <= 3, "the measured begins reused slots instead of creating them: {slots} slots");
     let worst = [p90("begin", begin), p90("status", status), p90("hold_and_release", hold)];

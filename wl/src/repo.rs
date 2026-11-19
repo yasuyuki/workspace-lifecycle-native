@@ -37,6 +37,13 @@ pub fn prepare_environment() {
     }
 }
 
+/// Opens a repository for reading refs and its layout; no configuration file is read.
+pub fn open_refs_only(path: &Path) -> Result<gix::Repository> {
+    let repo = gix::open_opts(path, gix::open::Options::isolated())?;
+    crate::trace::point("open refs only");
+    Ok(repo)
+}
+
 /// Opens a repository with the configuration files Git reads, but without configuration from environment variables.
 pub fn open(path: &Path) -> Result<gix::Repository> {
     let mut permissions = gix::open::Permissions::default();
