@@ -288,12 +288,15 @@ fn spawn_detached(repo: &Path, args: &[&str]) {
         const DETACHED_PROCESS: u32 = 0x8;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
         const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB);
+        // Background work must never take the CPU from a foreground command.
+        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x4000;
+        const FLAGS: u32 = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | BELOW_NORMAL_PRIORITY_CLASS;
+        command.creation_flags(FLAGS | CREATE_BREAKAWAY_FROM_JOB);
         if command.spawn().is_ok() {
             return;
         }
         // A job that forbids breakaway refuses the flag; the child then stays in the caller's job.
-        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        command.creation_flags(FLAGS);
     }
     #[cfg(unix)]
     {
