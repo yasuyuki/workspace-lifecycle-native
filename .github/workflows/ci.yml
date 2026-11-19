@@ -18,3 +18,11 @@ jobs:
         if: always() && runner.os == 'Windows'
         shell: pwsh
         run: Get-Process | Sort-Object CPU -Descending | Select-Object -First 12 Name, CPU, Id | Format-Table -AutoSize
+      - name: release build
+        if: runner.os == 'Windows'
+        run: cargo build --locked --release -p wl
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: wl-windows-x64
+          path: target/release/wl.exe
