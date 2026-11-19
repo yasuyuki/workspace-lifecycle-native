@@ -17,11 +17,13 @@ Windows で開発 session を動かす人と agent が、task の開始から統
 | offload 実行先 | WSL の `ubuntu-26-development` | offload 専用の user と directory。`any` の validation 手順を走らせる（ADR 0014） |
 | push 判定 | 既存の `workspace_lifecycle.push` | worker が push の前に呼ぶ（ADR 0012） |
 
-Git の読取りは gix でプロセス内から行い、読む設定は必要な file に限る。git CLI は push、merge、branch の切替だけに使う。
+Git の読取りは gix でプロセス内から行う。設定は system、application、user の file を includes つきで読み、環境変数からの設定は読まない。Windows では gix が system の設定と attributes の場所を知るために git を起動するので、`wl` は Git の root を user ごとに `%LOCALAPPDATA%\wl\git-root` へ cache し、`EXEPATH` に入れてから開く（Git Bash と同じ）。git CLI は push、merge、fetch、slot の作成と差分の切替だけに使う。
+
+切り離した process は、Windows では標準 handle を継承させず、優先度を通常より低くして起動する。継承させると、呼び手が `wl` の出力の終わりを待つ間、background work の終了まで待たされる。
 
 ## データ
 
-すべて repository の Git 共通 dir の `wl/` の下に置く。一つの file に書く主体は常に一つで、更新は一時 file への書込みと rename で行う（ADR 0009）。
+すべて repository の Git 共通 dir の `wl/` の下に置く。一つの file に書く主体は常に一つで、更新は一時 file への書込みと rename で行う（ADR 0009）。新規作成は hard link で行い、既にあれば失敗する。前景の command の書込みは disk へ flush しない。crash で失われた書込みは、同じ command をもう一度実行すれば作り直される。
 
 | file | 書く主体 | 内容 |
 |---|---|---|
@@ -36,8 +38,8 @@ repository が管理する宣言は `.lifecycle.toml` に置く。validation の
 
 | command | 前景で行うこと | 想定の費用 |
 |---|---|---|
-| `wl begin <task>` | 空いている slot を選び、base から topic branch を作って切り替える。空きが無いときだけ新しい slot を作る | 差分の書込みだけ。新しい slot は 0.3〜0.5 s（推定、まれ） |
-| `wl status` | task の state file と未読の通知を読む | 数 ms |
+| `wl begin <task>` | 空いている slot を選び、base から topic branch を作って切り替える。base は fetch せず、最後に fetch した `origin/HEAD` を使う。空きの slot が base にあれば ref を動かすだけで、file は書かない。空きが無くなったら、次の slot の準備を background で始める | runner で p90 46〜48 ms。空きが無いときだけ 0.3〜0.5 s（推定、まれ） |
+| `wl status` | task の state file と未読の通知を読む | runner で p90 12〜17 ms |
 | `wl finish [--retire]` | HEAD を確定した commit として記録し、受付順の file を作り、worker を起動して戻る | 数 ms と process の起動 |
 | `wl hold` / `wl release-hold` | state file を書き換える | 数 ms |
 | `wl retire` | 明示の退役。slot を空きに戻す | 差分の書込み |
@@ -82,7 +84,7 @@ stateDiagram-v2
 
 - `begin` は空いている slot を割り当てる。
 - 退役は、宣言された slot cache を除く ignored data と未追跡 file を消してから、slot を base の HEAD に戻して空きにする。commit されていない内容があるときは、消す前に recovery copy を作る（ADR 0005）。
-- 空きの slot は、worker が background で最新の base へ進めておく。
+- 空きの slot は、background の準備が `origin` を fetch したうえで最新の base へ進めておく。準備の最後に、1 秒ほど置いてから index を更新する。checkout 直後の index は全 file を「racy」として扱い、次の変更確認が全 file の内容を読むからである。
 
 ## 移行
 
