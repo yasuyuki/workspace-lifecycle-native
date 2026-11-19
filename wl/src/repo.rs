@@ -132,10 +132,12 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim_end().to_owned())
     } else {
+        // A merge reports its conflicts on stdout.
         Err(Error::new(format!(
-            "git {} failed: {}",
+            "git {} failed: {} {}",
             args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
+            String::from_utf8_lossy(&output.stderr).trim(),
+            String::from_utf8_lossy(&output.stdout).trim()
         )))
     }
 }

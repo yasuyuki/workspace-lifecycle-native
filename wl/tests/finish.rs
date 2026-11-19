@@ -169,12 +169,16 @@ fn a_conflict_needs_action_leaves_the_target_alone_and_a_fixed_finish_integrates
 
     f.wl(&["finish", "alpha"]);
     let (task, notices) = f.wait_for("alpha", "needs-action");
-    assert!(task["finish"]["detail"].as_str().unwrap().contains("does not merge"), "{task}");
+    let detail = task["finish"]["detail"].as_str().unwrap();
+    assert!(detail.contains("does not merge") && detail.contains("a.txt"), "names the conflicting file: {detail}");
     assert!(notices.iter().any(|n| n["stage"] == "needs-action"));
     assert_eq!(f.origin_main(), before);
 
     git(&worktree, &["fetch", "-q", "origin"]);
-    let _ = Command::new("git").arg("-C").arg(&worktree).args(["merge", "-q", "origin/main"]).output();
+    let merge = Command::new("git").arg("-C").arg(&worktree).args(["merge", "-q", "origin/main"])
+        .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t")
+        .output().unwrap();
+    assert!(!merge.status.success() && worktree.join(".git").exists(), "the merge stops at the conflict");
     std::fs::write(worktree.join("a.txt"), "both\n").unwrap();
     git(&worktree, &["commit", "-q", "-am", "resolve"]);
     let out = f.wl(&["finish", "alpha"]);
