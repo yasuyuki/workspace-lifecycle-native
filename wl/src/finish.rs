@@ -27,6 +27,7 @@ pub fn finish(path: &Path, mut args: Args) -> Result<Value> {
     args.finish()?;
     let ws = Workspace::open(path)?;
     housekeeping(&ws)?;
+    crate::trace::point("housekeeping");
     let record = ws.task(&task)?;
     if record.stage != TaskStage::Ready {
         return Err(Error::new(format!("task {task} has not finished beginning; run begin again")));
@@ -41,6 +42,7 @@ pub fn finish(path: &Path, mut args: Args) -> Result<Value> {
     }
     let commit = slot.head_id()?.detach().to_string();
     let uncommitted = repo::has_changes(&slot)?;
+    crate::trace::point("slot read");
 
     let previous = Store::read_json::<Acceptance>(&ws.store.acceptance(task.as_str()))?;
     let progress = Store::read_json::<Progress>(&ws.store.progress(task.as_str()))?;
@@ -68,6 +70,7 @@ pub fn finish(path: &Path, mut args: Args) -> Result<Value> {
     };
     Store::write_json(&ws.store.acceptance(task.as_str()), &acceptance)?;
     Store::create_new(&ws.store.queue_dir(&target).join(format!("{:020}-{task}", acceptance.accepted_at_ms)), b"")?;
+    crate::trace::point("accepted");
     spawn_detached(&ws.layout.main_worktree, &["__work", task.as_str()]);
     Ok(json!({
         "task": task,

@@ -357,6 +357,14 @@ pub fn prepare_slot(path: &Path, args: Args) -> Result<Value> {
     Ok(json!({ "slot": n, "created": true, "fetched": fetched }))
 }
 
+struct SpawnTrace;
+
+impl Drop for SpawnTrace {
+    fn drop(&mut self) {
+        crate::trace::point("background started");
+    }
+}
+
 /// A checkout writes its files in the same instant as its index, so every entry is "racy" and the next
 /// dirty check hashes each file. Rewriting the index a moment later lets that check compare stat data only.
 fn settle_index(worktree: &Path) {
@@ -365,6 +373,7 @@ fn settle_index(worktree: &Path) {
 }
 
 pub(crate) fn spawn_detached(repo: &Path, args: &[&str]) {
+    let _spawned = SpawnTrace;
     let Ok(exe) = std::env::current_exe() else { return };
     let mut command = Command::new(exe);
     command.arg("--repo").arg(repo).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());

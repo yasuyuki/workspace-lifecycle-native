@@ -31,12 +31,19 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
+/// Prints the run's phase trace when it is slower than this, to explain outliers.
+const EXPLAIN_ABOVE_MS: f64 = 40.0;
+
 fn timed(repo: &Path, args: &[&str]) -> (f64, Value) {
     let start = Instant::now();
-    let out = Command::new(env!("CARGO_BIN_EXE_wl")).arg("--repo").arg(repo).args(args).output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_wl")).arg("--repo").arg(repo).args(args).env("WL_TRACE", "1").output().unwrap();
     let ms = start.elapsed().as_secs_f64() * 1e3;
     let value: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["ok"], true, "{args:?}: {value}");
+    if ms > EXPLAIN_ABOVE_MS {
+        let inner = String::from_utf8_lossy(&out.stderr);
+        println!("slow {args:?} wall {ms:.2} ms; {}", inner.lines().map(str::trim).collect::<Vec<_>>().join(" | "));
+    }
     (ms, value)
 }
 
