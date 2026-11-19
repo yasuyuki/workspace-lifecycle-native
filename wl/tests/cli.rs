@@ -13,7 +13,11 @@ fn git(dir: &Path, args: &[&str]) -> String {
 }
 
 fn wl(repo: &Path, args: &[&str]) -> Value {
-    let out = Command::new(env!("CARGO_BIN_EXE_wl")).arg("--repo").arg(repo).args(args).output().unwrap();
+    let home = repo.parent().unwrap().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_wl")).arg("--repo").arg(repo).args(args)
+        .env("HOME", &home).env("USERPROFILE", &home).env("XDG_CONFIG_HOME", &home)
+        .output().unwrap();
     serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("not json: {}", String::from_utf8_lossy(&out.stdout)))
 }
 

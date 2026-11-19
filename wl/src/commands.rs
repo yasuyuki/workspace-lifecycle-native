@@ -160,7 +160,8 @@ pub fn begin(path: &Path, mut args: Args) -> Result<Value> {
 
 /// Puts the slot checkout on a new branch at `base`. A clean slot already on `base` only needs its refs moved.
 fn switch_slot(worktree: &Path, branch: &str, base: gix::ObjectId) -> Result<()> {
-    let slot = repo::open(worktree)?;
+    let mut slot = repo::open(worktree)?;
+    slot.committer_or_set_generic_fallback()?;
     let head = slot.head()?;
     if head.referent_name().is_some_and(|name| name.as_bstr() == format!("refs/heads/{branch}").as_str()) {
         return Ok(());

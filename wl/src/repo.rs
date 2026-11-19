@@ -2,9 +2,18 @@ use crate::error::{Error, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Opens a repository reading only the configuration sources that change what `wl` observes.
+/// Opens a repository with the configuration files Git reads, but without configuration from environment variables.
 pub fn open(path: &Path) -> Result<gix::Repository> {
-    Ok(gix::open_opts(path, gix::open::Options::isolated())?)
+    let mut permissions = gix::open::Permissions::default();
+    permissions.config = gix::open::permissions::Config {
+        git_binary: false,
+        system: true,
+        git: true,
+        user: true,
+        env: false,
+        includes: true,
+    };
+    Ok(gix::open_opts(path, gix::open::Options::default().permissions(permissions))?)
 }
 
 pub struct Layout {

@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: yasuyuki/workspace-lifecycle
-          path: wl
+          path: legacy
       - run: git clone -q --depth 1 https://github.com/rust-lang/cargo big
       - uses: actions/setup-python@v5
         with:
@@ -25,7 +25,7 @@ jobs:
       - run: |
           python -m venv venv
           if [ -d venv/Scripts ]; then echo "VPY=$PWD/venv/Scripts/python.exe" >> "$GITHUB_ENV"; else echo "VPY=$PWD/venv/bin/python" >> "$GITHUB_ENV"; fi
-      - run: '"$VPY" -m pip install -q ./wl'
+      - run: '"$VPY" -m pip install -q ./legacy'
       - run: cargo build --release --manifest-path probe/Cargo.toml
       - name: measure
         run: |
@@ -37,20 +37,20 @@ jobs:
             $P spawn probe_noop_first_launch 1 $P noop
             $P spawn probe_noop 50 $P noop
             $P spawn git_version 50 git --version
-            $P spawn git_rev_parse_small 50 git -C wl rev-parse HEAD
+            $P spawn git_rev_parse_small 50 git -C legacy rev-parse HEAD
             $P spawn git_status_big 20 git -C big status --porcelain
             if [ -x "/c/Program Files/Git/mingw64/bin/git.exe" ]; then
-              $P spawn git_mingw64_rev_parse_small 50 "/c/Program Files/Git/mingw64/bin/git.exe" -C wl rev-parse HEAD
+              $P spawn git_mingw64_rev_parse_small 50 "/c/Program Files/Git/mingw64/bin/git.exe" -C legacy rev-parse HEAD
             fi
             $P spawn python_pass 20 "$VPY" -c pass
             $P spawn lifecycle_version 20 "$VPY" -m workspace_lifecycle --version
-            $P spawn probe_gix_once_small 50 $P gix-once wl
+            $P spawn probe_gix_once_small 50 $P gix-once legacy
             $P spawn probe_gix_once_big 20 $P gix-once big
-            $P spawn probe_gix_once_no_git_binary_small 50 $P gix-once-no-git-binary wl
+            $P spawn probe_gix_once_no_git_binary_small 50 $P gix-once-no-git-binary legacy
             $P spawn probe_gix_once_no_git_binary_big 20 $P gix-once-no-git-binary big
-            git -C wl fetch -q --unshallow || true
-            for i in $(seq 0 9); do git -C wl branch -q t$i HEAD; done
-            $P spawn git_worktree_add_148_files 10 git -C wl worktree add -q ../wt{i} t{i}
+            git -C legacy fetch -q --unshallow || true
+            for i in $(seq 0 9); do git -C legacy branch -q t$i HEAD; done
+            $P spawn git_worktree_add_148_files 10 git -C legacy worktree add -q ../wt{i} t{i}
             git init -q synth && for i in $(seq 1 400); do head -c 4096 /dev/urandom | base64 > synth/f$i.txt; done
             git -C synth add -A && git -C synth -c user.name=p -c user.email=p@p commit -q -m s
             for i in $(seq 0 9); do git -C synth branch -q s$i HEAD; done
@@ -59,9 +59,9 @@ jobs:
             $P spawn git_branch_create 10 git -C synth branch -q c{i} HEAD
             $P spawn bash_noop 10 bash -c true
             git config --show-origin --show-scope --list | grep -i -E 'autocrlf|include|user\.|core\.' || true
-            for i in 1 2 3; do for on in none system git user env includes system,git,user,includes system,git,user,env,includes; do $P gix-perm wl $on; done; done
-            for i in 1 2 3; do $P gix-phases wl; $P gix-phases wl isolated; $P gix-phases big; done
-            $P gix wl 50
+            for i in 1 2 3; do for on in none system git user env includes system,git,user,includes system,git,user,env,includes; do $P gix-perm legacy $on; done; done
+            for i in 1 2 3; do $P gix-phases legacy; $P gix-phases legacy isolated; $P gix-phases big; done
+            $P gix legacy 50
             $P gix big 20
           } 2>&1 | tee results-${{ matrix.os }}.jsonl
       - uses: actions/upload-artifact@v4
