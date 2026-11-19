@@ -46,6 +46,8 @@ jobs:
             $P spawn lifecycle_version 20 "$VPY" -m workspace_lifecycle --version
             $P spawn probe_gix_once_small 50 $P gix-once wl
             $P spawn probe_gix_once_big 20 $P gix-once big
+            $P spawn probe_gix_once_no_git_binary_small 50 $P gix-once-no-git-binary wl
+            $P spawn probe_gix_once_no_git_binary_big 20 $P gix-once-no-git-binary big
             $P gix wl 50
             $P gix big 20
           } 2>&1 | tee results-${{ matrix.os }}.jsonl

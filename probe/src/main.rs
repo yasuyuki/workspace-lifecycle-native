@@ -11,7 +11,16 @@ fn stats(name: &str, mut ms: Vec<f64>) {
 }
 
 fn read_repo(path: &str) -> Result<(String, bool, usize), Box<dyn std::error::Error>> {
-    let repo = gix::open(path)?;
+    read_with(gix::open(path)?)
+}
+
+fn read_repo_no_git_binary(path: &str) -> Result<(String, bool, usize), Box<dyn std::error::Error>> {
+    let mut permissions = gix::open::Permissions::default();
+    permissions.config.git_binary = false;
+    read_with(gix::open_opts(path, gix::open::Options::default().permissions(permissions))?)
+}
+
+fn read_with(repo: gix::Repository) -> Result<(String, bool, usize), Box<dyn std::error::Error>> {
     let head = repo.head_id()?.to_string();
     let dirty = repo.is_dirty()?;
     let worktrees = repo.worktrees()?.len();
@@ -49,6 +58,10 @@ fn main() -> ExitCode {
             stats("gix_open_head_dirty_worktrees_in_process", ms);
             ExitCode::SUCCESS
         }
+        Some("gix-once-no-git-binary") => match read_repo_no_git_binary(&args[1]) {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(e) => { eprintln!("{e}"); ExitCode::FAILURE }
+        },
         Some("gix-once") => match read_repo(&args[1]) {
             Ok(_) => ExitCode::SUCCESS,
             Err(e) => { eprintln!("{e}"); ExitCode::FAILURE }
