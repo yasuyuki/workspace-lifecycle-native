@@ -14,3 +14,7 @@ jobs:
       - run: cargo test --locked --workspace
       - name: command latency
         run: cargo test --locked --release -p wl --test latency -- --ignored --nocapture
+      - name: busiest processes
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: Get-Process | Sort-Object CPU -Descending | Select-Object -First 12 Name, CPU, Id | Format-Table -AutoSize

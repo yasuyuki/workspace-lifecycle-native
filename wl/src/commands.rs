@@ -187,6 +187,49 @@ fn switch_slot(worktree: &Path, branch: &str, base: gix::ObjectId) -> Result<()>
     Ok(())
 }
 
+/// Returns the task's slot to the free pool. P1 refuses anything that retiring would lose: changes in the
+/// checkout, untracked files, and commits that are neither the base nor in the remote default branch.
+pub fn retire(path: &Path, mut args: Args) -> Result<Value> {
+    let task = task_name(&mut args)?;
+    args.finish()?;
+    let ws = Workspace::open(path)?;
+    let task_path = ws.store.task(task.as_str());
+    let Some(record) = Store::read_json::<TaskRecord>(&task_path)? else {
+        return Ok(json!({ "task": task, "retired": true }));
+    };
+    if Store::read_json::<HoldRecord>(&ws.store.hold(task.as_str()))?.is_some() {
+        return Err(Error::new(format!("task {task} is held; release the hold first")));
+    }
+    if let Some(n) = record.slot {
+        let worktree = ws.slot_path(n)?;
+        if worktree.join(".git").exists() {
+            let untracked_or_changed = repo::git(&worktree, &["status", "--porcelain", "--untracked-files=all"])?;
+            if !untracked_or_changed.is_empty() {
+                return Err(Error::new(format!("task {task} has uncommitted or untracked files in {}", worktree.display())));
+            }
+            let branch_ref = format!("refs/heads/{}", record.branch);
+            if let Ok(tip) = repo::git(&worktree, &["rev-parse", "--verify", "--quiet", &branch_ref]) {
+                let published = tip == record.base
+                    || repo::git(&worktree, &["merge-base", "--is-ancestor", &tip, "refs/remotes/origin/HEAD"]).is_ok();
+                if !published {
+                    return Err(Error::new(format!("task {task} has commits that are not in the remote default branch")));
+                }
+                repo::git(&worktree, &["switch", "--quiet", "--detach", &tip])?;
+                repo::git(&worktree, &["branch", "--quiet", "--delete", "--force", &record.branch])?;
+            }
+        }
+        Store::remove(&ws.store.hold(task.as_str()))?;
+        Store::remove(&task_path)?;
+        if Store::read_text(&ws.store.claim(n))?.as_deref() == Some(task.as_str()) {
+            Store::remove(&ws.store.claim(n))?;
+        }
+    } else {
+        Store::remove(&task_path)?;
+    }
+    spawn_detached(&ws.layout.main_worktree, &["__prepare-slot"]);
+    Ok(json!({ "task": task, "retired": true }))
+}
+
 pub fn status(path: &Path, mut args: Args) -> Result<Value> {
     let only = args.optional_positional().map(TaskName::try_from).transpose().map_err(Error::new)?;
     args.finish()?;

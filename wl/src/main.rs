@@ -13,7 +13,8 @@ const USAGE: &str = "usage:
   wl [--repo PATH] begin TASK --request URL [--branch NAME] [--base REV]
   wl [--repo PATH] status [TASK]
   wl [--repo PATH] hold TASK --reason TEXT
-  wl [--repo PATH] release-hold TASK --decision REF";
+  wl [--repo PATH] release-hold TASK --decision REF
+  wl [--repo PATH] retire TASK";
 
 pub struct Args {
     rest: Vec<String>,
@@ -62,6 +63,7 @@ fn run() -> Result<serde_json::Value> {
         "status" => commands::status(&repo, args),
         "hold" => commands::hold(&repo, args),
         "release-hold" => commands::release_hold(&repo, args),
+        "retire" => commands::retire(&repo, args),
         "__prepare-slot" => commands::prepare_slot(&repo, args),
         "--help" | "-h" | "help" => {
             println!("{USAGE}");

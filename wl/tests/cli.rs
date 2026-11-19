@@ -157,3 +157,39 @@ fn begin_refuses_a_free_slot_with_modified_or_staged_files() {
         assert!(out["error"].as_str().unwrap().contains("uncommitted changes"), "{out}");
     }
 }
+
+#[test]
+fn retire_frees_the_slot_for_the_next_begin_and_deletes_the_branch() {
+    let f = fixture();
+    let first = wl(&f.main, &["begin", "alpha", "--request", "r"]);
+    let out = wl(&f.main, &["retire", "alpha"]);
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(wl(&f.main, &["retire", "alpha"])["ok"], true, "retiring twice is harmless");
+    assert!(!git(&f.main, &["branch", "--list", "alpha"]).contains("alpha"));
+    let next = wl(&f.main, &["begin", "beta", "--request", "r"]);
+    assert_eq!(next["worktree"], first["worktree"]);
+    assert_eq!(wl(&f.main, &["status"])["tasks"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn retire_refuses_to_lose_work_or_a_held_task() {
+    let f = fixture();
+    let out = wl(&f.main, &["begin", "alpha", "--request", "r"]);
+    let worktree = PathBuf::from(out["worktree"].as_str().unwrap());
+
+    std::fs::write(worktree.join("new.txt"), "n\n").unwrap();
+    let refused = wl(&f.main, &["retire", "alpha"]);
+    assert!(refused["error"].as_str().unwrap().contains("untracked"), "{refused}");
+
+    git(&worktree, &["add", "new.txt"]);
+    git(&worktree, &["commit", "-q", "-m", "work"]);
+    let refused = wl(&f.main, &["retire", "alpha"]);
+    assert!(refused["error"].as_str().unwrap().contains("not in the remote default branch"), "{refused}");
+
+    git(&worktree, &["push", "-q", "origin", "HEAD:main"]);
+    git(&f.main, &["fetch", "-q", "origin"]);
+    wl(&f.main, &["hold", "alpha", "--reason", "keep"]);
+    assert_eq!(wl(&f.main, &["retire", "alpha"])["ok"], false);
+    wl(&f.main, &["release-hold", "alpha", "--decision", "d"]);
+    assert_eq!(wl(&f.main, &["retire", "alpha"])["ok"], true, "published work can be retired");
+}
