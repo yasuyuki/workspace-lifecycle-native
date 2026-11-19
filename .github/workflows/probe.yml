@@ -1,0 +1,55 @@
+name: probe
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: yasuyuki/workspace-lifecycle
+          path: wl
+      - run: git clone -q --depth 1 https://github.com/rust-lang/cargo big
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: |
+          python -m venv venv
+          if [ -d venv/Scripts ]; then echo "VPY=$PWD/venv/Scripts/python.exe" >> "$GITHUB_ENV"; else echo "VPY=$PWD/venv/bin/python" >> "$GITHUB_ENV"; fi
+      - run: '"$VPY" -m pip install -q ./wl'
+      - run: cargo build --release --manifest-path probe/Cargo.toml
+      - name: measure
+        run: |
+          set -o pipefail
+          P=probe/target/release/probe; [ -f "$P.exe" ] && P="$P.exe"
+          G=$(command -v git)
+          {
+            echo "{\"os\":\"${{ matrix.os }}\",\"git\":\"$G\"}"
+            $P spawn probe_noop_first_launch 1 $P noop
+            $P spawn probe_noop 50 $P noop
+            $P spawn git_version 50 git --version
+            $P spawn git_rev_parse_small 50 git -C wl rev-parse HEAD
+            $P spawn git_status_big 20 git -C big status --porcelain
+            if [ -x "/c/Program Files/Git/mingw64/bin/git.exe" ]; then
+              $P spawn git_mingw64_rev_parse_small 50 "/c/Program Files/Git/mingw64/bin/git.exe" -C wl rev-parse HEAD
+            fi
+            $P spawn python_pass 20 "$VPY" -c pass
+            $P spawn lifecycle_version 20 "$VPY" -m workspace_lifecycle --version
+            $P spawn probe_gix_once_small 50 $P gix-once wl
+            $P spawn probe_gix_once_big 20 $P gix-once big
+            $P gix wl 50
+            $P gix big 20
+          } 2>&1 | tee results-${{ matrix.os }}.jsonl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.os }}
+          path: results-${{ matrix.os }}.jsonl

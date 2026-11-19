@@ -1,0 +1,12 @@
+[package]
+name = "probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gix = { version = "0.90.0", default-features = false, features = ["status", "max-performance", "sha1"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
