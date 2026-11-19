@@ -61,7 +61,7 @@ fn foreground_commands_stay_under_the_latency_limit() {
 
     timed(&main, &["begin", "first", "--request", "r"]);
     let mut begin = Vec::new();
-    for i in 0..10 {
+    for i in 0..30 {
         wait_for_free_slot(&main);
         let start = Instant::now();
         let out = Command::new(env!("CARGO_BIN_EXE_wl")).arg("--repo").arg(&main)

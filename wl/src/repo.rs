@@ -84,7 +84,8 @@ pub fn resolve_base(repo: &gix::Repository, spec: Option<&str>) -> Result<gix::O
 
 pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let mut command = Command::new("git");
-    command.arg("-C").arg(dir).args(args).stdin(Stdio::null());
+    // Automatic gc and maintenance would hold ref locks that a foreground command then waits for.
+    command.args(["-c", "gc.auto=0", "-c", "maintenance.auto=false", "-C"]).arg(dir).args(args).stdin(Stdio::null());
     if SET_EXEPATH.load(Ordering::Relaxed) {
         command.env_remove("EXEPATH");
     }
