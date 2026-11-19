@@ -8,17 +8,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 struct Workspace {
-    repo: gix::Repository,
     layout: Layout,
     store: Store,
 }
 
 impl Workspace {
     fn open(path: &Path) -> Result<Self> {
-        let repo = repo::open_refs_only(path)?;
-        let layout = repo::layout(&repo)?;
+        let layout = repo::layout(path)?;
         let store = Store::new(&layout.common_dir);
-        Ok(Self { repo, layout, store })
+        Ok(Self { layout, store })
     }
 
     fn slots_root(&self) -> PathBuf {
@@ -116,12 +114,22 @@ pub fn begin(path: &Path, mut args: Args) -> Result<Value> {
 
     let ws = Workspace::open(path)?;
     let task_path = ws.store.task(task.as_str());
+    let mut opened_slot = None;
     let mut record = match Store::read_json::<TaskRecord>(&task_path)? {
         Some(existing) => existing,
         None => {
-            let base = repo::resolve_base(&ws.repo, base_spec.as_deref())?;
             // A begin of the same task finds the claim it or an earlier attempt made, so both use one slot.
             let slot = ws.claim_slot(task.as_str())?;
+            crate::trace::point("slot claimed");
+            let base = match Store::read_json::<SlotRecord>(&ws.store.slot(slot))? {
+                Some(existing) => {
+                    let slot_repo = repo::open(&existing.path)?;
+                    let base = repo::resolve_base(&slot_repo, base_spec.as_deref())?;
+                    opened_slot = Some(slot_repo);
+                    base
+                }
+                None => repo::resolve_base(&repo::open_refs_only(&ws.layout.main_worktree)?, base_spec.as_deref())?,
+            };
             let fresh = TaskRecord {
                 version: VERSION,
                 task: task.clone(),
@@ -145,9 +153,12 @@ pub fn begin(path: &Path, mut args: Args) -> Result<Value> {
         return ws.report(&record);
     }
     let base: gix::ObjectId = record.base.parse().map_err(|e| Error::new(format!("recorded base: {e}")))?;
-    crate::trace::point("slot claimed");
     let worktree = ws.ensure_slot_checkout(record.slot, base)?;
-    switch_slot(&worktree, &record.branch, base)?;
+    let slot_repo = match opened_slot {
+        Some(slot_repo) => slot_repo,
+        None => repo::open(&worktree)?,
+    };
+    switch_slot(slot_repo, &worktree, &record.branch, base)?;
     record.stage = TaskStage::Ready;
     Store::write_json(&task_path, &record)?;
 
@@ -159,8 +170,7 @@ pub fn begin(path: &Path, mut args: Args) -> Result<Value> {
 }
 
 /// Puts the slot checkout on a new branch at `base`. A clean slot already on `base` only needs its refs moved.
-fn switch_slot(worktree: &Path, branch: &str, base: gix::ObjectId) -> Result<()> {
-    let mut slot = repo::open(worktree)?;
+fn switch_slot(mut slot: gix::Repository, worktree: &Path, branch: &str, base: gix::ObjectId) -> Result<()> {
     slot.committer_or_set_generic_fallback()?;
     let head = slot.head()?;
     if head.referent_name().is_some_and(|name| name.as_bstr() == format!("refs/heads/{branch}").as_str()) {
@@ -294,7 +304,7 @@ pub fn prepare_slot(path: &Path, args: Args) -> Result<Value> {
     }
     let fetched = repo::git(&ws.layout.main_worktree, &["fetch", "--quiet", "origin"]).is_ok();
     let ws = Workspace::open(path)?;
-    let base = repo::resolve_base(&ws.repo, None)?;
+    let base = repo::resolve_base(&repo::open_refs_only(&ws.layout.main_worktree)?, None)?;
     for n in ws.free_slots()? {
         let worktree = ws.slot_path(n)?;
         if repo::open(&worktree)?.head_id().ok().map(|id| id.detach()) == Some(base) {

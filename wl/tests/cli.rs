@@ -193,3 +193,14 @@ fn retire_refuses_to_lose_work_or_a_held_task() {
     wl(&f.main, &["release-hold", "alpha", "--decision", "d"]);
     assert_eq!(wl(&f.main, &["retire", "alpha"])["ok"], true, "published work can be retired");
 }
+
+#[test]
+fn commands_run_from_inside_a_slot_find_the_same_tasks() {
+    let f = fixture();
+    let out = wl(&f.main, &["begin", "alpha", "--request", "r"]);
+    let worktree = PathBuf::from(out["worktree"].as_str().unwrap());
+    let inside = wl(&worktree, &["status", "alpha"]);
+    assert_eq!(inside["tasks"][0]["worktree"], out["worktree"], "{inside}");
+    assert_eq!(wl(&worktree, &["hold", "alpha", "--reason", "x"])["ok"], true);
+    assert_eq!(wl(&f.main, &["status", "alpha"])["tasks"][0]["hold"], "x");
+}

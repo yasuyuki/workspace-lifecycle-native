@@ -4,7 +4,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+/// ADR 0008: p90 50 ms on the Windows controller. Runner VMs differ by about 2x in speed, so CI compares
+/// each command scaled to a machine whose process start through pipes takes REFERENCE_START_MS, the fast
+/// runners' baseline; a faster machine is not scaled up. The controller measurement in P6 is the acceptance;
+/// this gate catches regressions.
 const LIMIT_MS: f64 = 50.0;
+const REFERENCE_START_MS: f64 = 10.0;
 
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git").arg("-C").arg(dir).args(args)
@@ -30,6 +35,12 @@ fn trace(repo: &Path, args: &[&str]) {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
     let inner = String::from_utf8_lossy(&out.stderr);
     println!("trace {args:?} wall {ms:.2} ms; {}", inner.lines().map(str::trim).collect::<Vec<_>>().join(" | "));
+}
+
+fn median(samples: &[f64]) -> f64 {
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted[sorted.len() / 2]
 }
 
 fn p90(name: &str, mut samples: Vec<f64>) -> f64 {
@@ -100,7 +111,9 @@ fn foreground_commands_stay_under_the_latency_limit() {
         Command::new(env!("CARGO_BIN_EXE_wl")).arg("help").output().unwrap();
         start.elapsed().as_secs_f64() * 1e3
     }).collect();
+    let start_ms = median(&baseline);
     p90("process_start_and_pipes_baseline", baseline);
+    let scale = (REFERENCE_START_MS / start_ms).min(1.0);
     let status: Vec<f64> = (0..30).map(|_| timed(&main, &["status"]).0).collect();
     let mut hold = Vec::new();
     for _ in 0..20 {
@@ -112,6 +125,7 @@ fn foreground_commands_stay_under_the_latency_limit() {
     }
     let slots = timed(&main, &["status"]).1["slots"]["total"].as_u64().unwrap();
     assert!(slots <= 3, "the measured begins reused slots instead of creating them: {slots} slots");
-    let worst = [p90("begin", begin), p90("status", status), p90("hold_and_release", hold)];
-    assert!(worst.iter().all(|&p| p <= LIMIT_MS), "p90 above {LIMIT_MS} ms: {worst:?}");
+    let worst = [p90("begin", begin), p90("status", status), p90("hold_and_release", hold)].map(|p| p * scale);
+    println!("p90 scaled to a {REFERENCE_START_MS} ms process start (scale {scale:.2}): {worst:?}");
+    assert!(worst.iter().all(|&p| p <= LIMIT_MS), "scaled p90 above {LIMIT_MS} ms: {worst:?}");
 }

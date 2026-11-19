@@ -65,15 +65,44 @@ pub struct Layout {
     pub main_worktree: PathBuf,
 }
 
-pub fn layout(repo: &gix::Repository) -> Result<Layout> {
-    let common_dir = gix::path::realpath(repo.common_dir())
-        .map_err(|e| Error::new(format!("cannot resolve the Git common dir: {e}")))?;
+/// Finds the Git common dir and the main worktree from the files Git keeps, without opening the repository.
+/// `path` is the main worktree or a linked worktree such as a slot.
+pub fn layout(path: &Path) -> Result<Layout> {
+    let root = std::path::absolute(path).map_err(|e| Error::io(path, e))?;
+    let dot_git = root.join(".git");
+    let meta = std::fs::metadata(&dot_git).map_err(|_| Error::new(format!("{} is not the top of a Git checkout", root.display())))?;
+    let common_dir = if meta.is_dir() {
+        dot_git
+    } else {
+        let text = std::fs::read_to_string(&dot_git).map_err(|e| Error::io(&dot_git, e))?;
+        let git_dir = text.trim().strip_prefix("gitdir:").map(str::trim).ok_or_else(|| Error::new(format!("{} is not a gitdir file", dot_git.display())))?;
+        let git_dir = lexical(&root.join(git_dir));
+        match std::fs::read_to_string(git_dir.join("commondir")) {
+            Ok(common) => lexical(&git_dir.join(common.trim())),
+            Err(_) => git_dir,
+        }
+    };
     let main_worktree = common_dir
         .parent()
         .filter(|_| common_dir.file_name().is_some_and(|n| n == ".git"))
         .ok_or_else(|| Error::new("wl needs a repository whose main worktree holds the .git directory"))?
         .to_path_buf();
     Ok(Layout { common_dir, main_worktree })
+}
+
+/// Removes `.` and `..` components without touching the file system.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// The commit a new task starts from: `spec`, or the remote default branch as last fetched.
