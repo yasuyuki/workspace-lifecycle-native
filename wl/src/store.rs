@@ -20,6 +20,7 @@ impl Store {
     pub fn task(&self, task: &str) -> PathBuf { self.tasks_dir().join(format!("{task}.json")) }
     pub fn hold(&self, task: &str) -> PathBuf { self.tasks_dir().join(format!("{task}.hold.json")) }
     pub fn slot(&self, slot: u32) -> PathBuf { self.slots_dir().join(format!("{slot}.json")) }
+    pub fn prepare_lock(&self) -> PathBuf { self.root.join("workers").join("prepare.lock") }
     pub fn claim(&self, slot: u32) -> PathBuf { self.slots_dir().join(format!("{slot}.claim")) }
 
     pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {

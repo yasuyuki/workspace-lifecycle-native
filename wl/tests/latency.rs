@@ -44,11 +44,16 @@ fn wait_for_free_slot(repo: &Path) {
     }
 }
 
-/// Waits until both spare slots are free again, so the next begin reuses a slot as real use does.
+/// Waits until background work has ended and both spare slots are free, so the next begin reuses a slot.
 fn wait_until_quiet(repo: &Path) {
+    // The detached preparation takes its lock shortly after it starts.
     std::thread::sleep(Duration::from_millis(300));
     let start = Instant::now();
-    while timed(repo, &["status"]).1["slots"]["free"].as_u64() < Some(2) {
+    loop {
+        let status = timed(repo, &["status"]).1;
+        if status["background"] == false && status["slots"]["free"].as_u64() >= Some(2) {
+            return;
+        }
         assert!(start.elapsed() < Duration::from_secs(120), "slots did not become free");
         std::thread::sleep(Duration::from_millis(50));
     }

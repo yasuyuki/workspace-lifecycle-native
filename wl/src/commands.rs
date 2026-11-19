@@ -244,7 +244,15 @@ pub fn status(path: &Path, mut args: Args) -> Result<Value> {
     };
     let tasks = names.iter().map(|t| ws.task(t).and_then(|r| ws.report(&r))).collect::<Result<Vec<_>>>()?;
     let total = ws.slot_numbers(".json")?.len();
-    Ok(json!({ "tasks": tasks, "slots": { "total": total, "free": ws.free_slots()?.len() } }))
+    let background = background_running(&ws.store.prepare_lock());
+    Ok(json!({ "tasks": tasks, "slots": { "total": total, "free": ws.free_slots()?.len() }, "background": background }))
+}
+
+fn background_running(lock_path: &Path) -> bool {
+    match std::fs::OpenOptions::new().write(true).open(lock_path) {
+        Ok(file) => matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+        Err(_) => false,
+    }
 }
 
 pub fn hold(path: &Path, mut args: Args) -> Result<Value> {
@@ -269,21 +277,30 @@ pub fn release_hold(path: &Path, mut args: Args) -> Result<Value> {
 }
 
 /// Background: fetches the remote default branch and keeps one free slot on it for the next begin.
+/// One preparation runs at a time; the OS lock it holds is how `status` reports background work.
 pub fn prepare_slot(path: &Path, args: Args) -> Result<Value> {
     args.finish()?;
     let ws = Workspace::open(path)?;
+    let lock_path = ws.store.prepare_lock();
+    std::fs::create_dir_all(lock_path.parent().unwrap()).map_err(|e| Error::io(&lock_path, e))?;
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&lock_path).map_err(|e| Error::io(&lock_path, e))?;
+    if lock.try_lock().is_err() {
+        return Ok(json!({ "skipped": "another preparation is running" }));
+    }
     let fetched = repo::git(&ws.layout.main_worktree, &["fetch", "--quiet", "origin"]).is_ok();
     let ws = Workspace::open(path)?;
     let base = repo::resolve_base(&ws.repo, None)?;
+    for n in ws.free_slots()? {
+        let worktree = ws.slot_path(n)?;
+        if repo::open(&worktree)?.head_id().ok().map(|id| id.detach()) == Some(base) {
+            return Ok(json!({ "slot": n, "advanced": false, "fetched": fetched }));
+        }
+    }
     if let Some(&n) = ws.free_slots()?.first() {
         let worktree = ws.slot_path(n)?;
         if Store::create_new(&ws.store.claim(n), PREPARING.as_bytes())? {
-            let slot = repo::open(&worktree)?;
-            let moved = if slot.head_id().ok().map(|id| id.detach()) != Some(base) && !repo::has_changes(&slot)? {
-                repo::git(&worktree, &["checkout", "--quiet", "--detach", &base.to_string()]).is_ok()
-            } else {
-                false
-            };
+            let moved = !repo::has_changes(&repo::open(&worktree)?)?
+                && repo::git(&worktree, &["checkout", "--quiet", "--detach", &base.to_string()]).is_ok();
             if moved {
                 settle_index(&worktree);
             }
