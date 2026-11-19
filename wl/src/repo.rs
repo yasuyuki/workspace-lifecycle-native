@@ -123,3 +123,44 @@ pub fn start_branch_in_place(slot: &gix::Repository, branch: &str, base: gix::Ob
     ])?;
     Ok(())
 }
+
+/// Whether the checkout differs from its HEAD in the index or in tracked files; untracked files do not count.
+/// Same as gix's `is_dirty`, but on one thread: starting a thread per CPU costs more than checking a slot.
+pub fn has_changes(repo: &gix::Repository) -> Result<bool> {
+    let head_tree = repo.head_tree_id_or_empty()?;
+    let index = repo.index_or_empty()?;
+    let mut pathspec = repo.pathspec(
+        false,
+        None::<&str>,
+        false,
+        &gix::index::State::new(repo.object_hash()),
+        gix::worktree::stack::state::attributes::Source::IdMapping,
+    )?;
+    let mut staged = false;
+    repo.tree_index_status(
+        &head_tree,
+        &index,
+        Some(&mut pathspec),
+        gix::status::tree_index::TrackRenames::Disabled,
+        |_, _, _| {
+            staged = true;
+            Ok(std::ops::ControlFlow::Break(()))
+        },
+    )?;
+    if staged {
+        return Ok(true);
+    }
+    let modified = repo
+        .status(gix::progress::Discard)?
+        .index_worktree_rewrites(None)
+        .index_worktree_submodules(gix::status::Submodule::AsConfigured { check_dirty: true })
+        .index_worktree_options_mut(|options| {
+            options.dirwalk_options = None;
+            options.thread_limit = Some(1);
+        })
+        .into_index_worktree_iter(Vec::new())?
+        .take_while(std::result::Result::is_ok)
+        .next()
+        .is_some();
+    Ok(modified)
+}

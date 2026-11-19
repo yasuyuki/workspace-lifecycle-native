@@ -65,6 +65,13 @@ fn foreground_commands_stay_under_the_latency_limit() {
         wait_for_free_slot(&main);
         begin.push(timed(&main, &["begin", &format!("t{i}"), "--request", "r"]).0);
     }
+    wait_for_free_slot(&main);
+    let baseline: Vec<f64> = (0..30).map(|_| {
+        let start = Instant::now();
+        Command::new(env!("CARGO_BIN_EXE_wl")).arg("help").output().unwrap();
+        start.elapsed().as_secs_f64() * 1e3
+    }).collect();
+    p90("process_start_and_pipes_baseline", baseline);
     let status: Vec<f64> = (0..30).map(|_| timed(&main, &["status"]).0).collect();
     let mut hold = Vec::new();
     for _ in 0..20 {

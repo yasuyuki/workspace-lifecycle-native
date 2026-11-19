@@ -50,7 +50,8 @@ impl Store {
             TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         let mut file = fs::File::create(&temp).map_err(|e| Error::io(&temp, e))?;
-        file.write_all(bytes).and_then(|_| file.sync_all()).map_err(|e| Error::io(&temp, e))?;
+        // Not flushed to disk: a foreground write lost to a crash is rebuilt by running the command again.
+        file.write_all(bytes).map_err(|e| Error::io(&temp, e))?;
         Ok(temp)
     }
 

@@ -168,7 +168,7 @@ fn switch_slot(worktree: &Path, branch: &str, base: gix::ObjectId) -> Result<()>
     if head.referent_name().is_some_and(|name| name.as_bstr() == format!("refs/heads/{branch}").as_str()) {
         return Ok(());
     }
-    let dirty = slot.is_dirty()?;
+    let dirty = repo::has_changes(&slot)?;
     crate::trace::point("slot dirty check");
     if dirty {
         return Err(Error::new(format!("slot {} has uncommitted changes", worktree.display())));
@@ -236,20 +236,33 @@ pub fn prepare_slot(path: &Path, args: Args) -> Result<Value> {
         let worktree = ws.slot_path(n)?;
         if Store::create_new(&ws.store.claim(n), PREPARING.as_bytes())? {
             let slot = repo::open(&worktree)?;
-            let moved = if slot.head_id().ok().map(|id| id.detach()) != Some(base) && !slot.is_dirty()? {
+            let moved = if slot.head_id().ok().map(|id| id.detach()) != Some(base) && !repo::has_changes(&slot)? {
                 repo::git(&worktree, &["checkout", "--quiet", "--detach", &base.to_string()]).is_ok()
             } else {
                 false
             };
+            if moved {
+                settle_index(&worktree);
+            }
             Store::remove(&ws.store.claim(n))?;
             return Ok(json!({ "slot": n, "advanced": moved, "fetched": fetched }));
         }
     }
     let n = ws.claim_slot(PREPARING)?;
     let created = ws.ensure_slot_checkout(n, base);
+    if let Ok(worktree) = &created {
+        settle_index(worktree);
+    }
     Store::remove(&ws.store.claim(n))?;
     created?;
     Ok(json!({ "slot": n, "created": true, "fetched": fetched }))
+}
+
+/// A checkout writes its files in the same instant as its index, so every entry is "racy" and the next
+/// dirty check hashes each file. Rewriting the index a moment later lets that check compare stat data only.
+fn settle_index(worktree: &Path) {
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let _ = repo::git(worktree, &["update-index", "-q", "--refresh"]);
 }
 
 fn spawn_detached(repo: &Path, args: &[&str]) {

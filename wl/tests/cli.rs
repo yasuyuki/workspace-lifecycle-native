@@ -140,3 +140,20 @@ fn invalid_names_and_unknown_tasks_are_refused() {
     assert_eq!(wl(&f.main, &["hold", "missing", "--reason", "x"])["ok"], false);
     assert_eq!(wl(&f.main, &["status", "missing"])["ok"], false);
 }
+
+#[test]
+fn begin_refuses_a_free_slot_with_modified_or_staged_files() {
+    for staged in [false, true] {
+        let f = fixture();
+        wl(&f.main, &["begin", "alpha", "--request", "r"]);
+        wait_for_free_slot(&f.main);
+        let free = f.main.with_file_name("product.slots").join("2");
+        std::fs::write(free.join("f3.txt"), "changed\n").unwrap();
+        if staged {
+            git(&free, &["add", "f3.txt"]);
+        }
+        let out = wl(&f.main, &["begin", "beta", "--request", "r"]);
+        assert_eq!(out["ok"], false, "staged={staged}: {out}");
+        assert!(out["error"].as_str().unwrap().contains("uncommitted changes"), "{out}");
+    }
+}
