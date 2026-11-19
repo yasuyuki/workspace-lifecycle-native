@@ -94,6 +94,7 @@ impl Workspace {
             "branch": record.branch,
             "base": record.base,
             "stage": record.stage,
+            "target": record.target,
             "worktree": worktree,
             "hold": hold,
             "finish": crate::finish::finish_report(self, &record.task)?,
@@ -109,9 +110,17 @@ pub fn begin(path: &Path, mut args: Args) -> Result<Value> {
     let task = task_name(&mut args)?;
     let request = args.required("request")?;
     let branch = args.option("branch")?.unwrap_or_else(|| task.to_string());
-    let base_spec = args.option("base")?;
+    let target = args.option("target")?;
+    let base_spec = match (args.option("base")?, &target) {
+        (Some(base), _) => Some(base),
+        (None, Some(target)) => Some(format!("refs/remotes/origin/{target}")),
+        (None, None) => None,
+    };
     args.finish()?;
     gix::refs::FullName::try_from(format!("refs/heads/{branch}"))?;
+    if let Some(target) = &target {
+        gix::refs::FullName::try_from(format!("refs/heads/{target}"))?;
+    }
 
     let ws = Workspace::open(path)?;
     crate::finish::housekeeping(&ws)?;
@@ -140,6 +149,7 @@ pub fn begin(path: &Path, mut args: Args) -> Result<Value> {
                 base: base.to_string(),
                 slot,
                 stage: TaskStage::Claimed,
+                target: target.clone(),
             };
             if Store::create_new_json(&task_path, &fresh)? {
                 fresh
@@ -148,7 +158,7 @@ pub fn begin(path: &Path, mut args: Args) -> Result<Value> {
             }
         }
     };
-    if record.request != request || record.branch != branch {
+    if record.request != request || record.branch != branch || record.target != target {
         return Err(Error::new(format!("task {task} already exists with another request or branch")));
     }
     if record.stage == TaskStage::Ready {
@@ -236,10 +246,10 @@ pub(crate) fn retire_task(ws: &Workspace, task: &TaskName, expected_head: Option
                     return Err(Error::new(format!("task {task} has commits after the integrated {expected}; retire it after the next finish")));
                 }
             }
-            let published = tip == record.base
-                || repo::git(&worktree, &["merge-base", "--is-ancestor", &tip, "refs/remotes/origin/HEAD"]).is_ok();
+            let integrated_into = record.target.as_ref().map_or("refs/remotes/origin/HEAD".to_owned(), |t| format!("refs/remotes/origin/{t}"));
+            let published = tip == record.base || repo::git(&worktree, &["merge-base", "--is-ancestor", &tip, &integrated_into]).is_ok();
             if !published {
-                return Err(Error::new(format!("task {task} has commits that are not in the remote default branch")));
+                return Err(Error::new(format!("task {task} has commits that are not in {integrated_into}")));
             }
             repo::git(&worktree, &["switch", "--quiet", "--detach", &tip])?;
             repo::git(&worktree, &["branch", "--quiet", "--delete", "--force", &record.branch])?;

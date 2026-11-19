@@ -58,7 +58,10 @@ pub fn finish(path: &Path, mut args: Args) -> Result<Value> {
             return Err(Error::new(format!("{commit} is already integrated; commit more work or pass --retire")));
         }
     }
-    let target = default_branch(&slot)?;
+    let target = match &record.target {
+        Some(target) => target.clone(),
+        None => default_branch(&slot)?,
+    };
     let acceptance = Acceptance {
         version: VERSION,
         task: task.clone(),

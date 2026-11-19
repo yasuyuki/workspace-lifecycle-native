@@ -184,7 +184,7 @@ fn retire_refuses_to_lose_work_or_a_held_task() {
     git(&worktree, &["add", "new.txt"]);
     git(&worktree, &["commit", "-q", "-m", "work"]);
     let refused = wl(&f.main, &["retire", "alpha"]);
-    assert!(refused["error"].as_str().unwrap().contains("not in the remote default branch"), "{refused}");
+    assert!(refused["error"].as_str().unwrap().contains("not in refs/remotes/origin/HEAD"), "{refused}");
 
     git(&worktree, &["push", "-q", "origin", "HEAD:main"]);
     git(&f.main, &["fetch", "-q", "origin"]);

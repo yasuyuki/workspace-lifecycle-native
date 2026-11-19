@@ -314,3 +314,31 @@ fn any_steps_run_in_the_offload_directory_with_fresh_file_times_and_windows_step
     assert!(windows[0].ends_with("integrate-main"), "{lines:?}");
     assert_eq!(windows[1], "here");
 }
+
+#[test]
+fn a_task_begun_with_a_target_starts_from_it_and_integrates_into_it() {
+    let f = Fixture::new(None);
+    git(&f.main, &["push", "-q", "origin", "HEAD:refs/heads/feature"]);
+    let pusher = f.dir.path().join("pusher");
+    git(f.dir.path(), &["clone", "-q", "-b", "feature", f.origin.to_str().unwrap(), pusher.to_str().unwrap()]);
+    std::fs::write(pusher.join("f.txt"), "f\n").unwrap();
+    git(&pusher, &["add", "f.txt"]);
+    git(&pusher, &["commit", "-q", "-m", "feature work"]);
+    git(&pusher, &["push", "-q", "origin", "feature"]);
+    git(&f.main, &["fetch", "-q", "origin"]);
+    let feature = git(&pusher, &["rev-parse", "HEAD"]);
+    let main_before = f.origin_main();
+
+    let out = f.wl(&["begin", "alpha", "--request", "r", "--target", "feature"]);
+    assert_eq!(out["base"], feature.as_str(), "{out}");
+    assert_eq!(out["target"], "feature");
+    let worktree = PathBuf::from(out["worktree"].as_str().unwrap());
+    std::fs::write(worktree.join("b.txt"), "b\n").unwrap();
+    git(&worktree, &["add", "b.txt"]);
+    git(&worktree, &["commit", "-q", "-m", "work"]);
+    let commit = git(&worktree, &["rev-parse", "HEAD"]);
+    f.wl(&["finish", "alpha", "--retire"]);
+    f.wait_for("alpha", "retired");
+    assert_eq!(git(&f.origin, &["rev-parse", "feature"]), commit);
+    assert_eq!(f.origin_main(), main_before);
+}

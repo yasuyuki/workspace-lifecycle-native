@@ -44,7 +44,7 @@ push preflight の argv は private policy の path を含むので repository �
 
 | command | 前景で行うこと | 想定の費用 |
 |---|---|---|
-| `wl begin <task>` | 空いている slot を選び、base から topic branch を作って切り替える。base は fetch せず、最後に fetch した `origin/HEAD` を使う。空きの slot が base にあれば ref を動かすだけで、file は書かない。空きが無くなったら、次の slot の準備を background で始める | runner で p90 46〜48 ms。空きが無いときだけ 0.3〜0.5 s（推定、まれ） |
+| `wl begin <task> [--target <branch>]` | 空いている slot を選び、base から topic branch を作って切り替える。base は fetch せず、最後に fetch した `origin/HEAD`（`--target` があれば `origin/<branch>`）を使う。`--target` の branch が、その task の統合先になる。空きの slot が base にあれば ref を動かすだけで、file は書かない。空きが無くなったら、次の slot の準備を background で始める | runner で p90 46〜48 ms。空きが無いときだけ 0.3〜0.5 s（推定、まれ） |
 | `wl status` | task の state file と未読の通知を読む | runner で p90 12〜17 ms |
 | `wl finish [--retire]` | HEAD を確定した commit として記録し、受付順の file を作り、worker を起動して戻る | 数 ms と process の起動 |
 | `wl hold` / `wl release-hold` | state file を書き換える | 数 ms |

@@ -48,6 +48,9 @@ pub struct TaskRecord {
     pub base: String,
     pub slot: u32,
     pub stage: TaskStage,
+    /// The branch finish integrates into; absent, the remote default branch.
+    #[serde(default)]
+    pub target: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
