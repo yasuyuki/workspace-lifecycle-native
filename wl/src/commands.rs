@@ -7,46 +7,46 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-struct Workspace {
-    layout: Layout,
-    store: Store,
+pub(crate) struct Workspace {
+    pub(crate) layout: Layout,
+    pub(crate) store: Store,
 }
 
 impl Workspace {
-    fn open(path: &Path) -> Result<Self> {
+    pub(crate) fn open(path: &Path) -> Result<Self> {
         let layout = repo::layout(path)?;
         let store = Store::new(&layout.common_dir);
         Ok(Self { layout, store })
     }
 
-    fn slots_root(&self) -> PathBuf {
+    pub(crate) fn slots_root(&self) -> PathBuf {
         let name = self.layout.main_worktree.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         self.layout.main_worktree.with_file_name(format!("{name}.slots"))
     }
 
-    fn slot_numbers(&self, suffix: &str) -> Result<Vec<u32>> {
+    pub(crate) fn slot_numbers(&self, suffix: &str) -> Result<Vec<u32>> {
         let mut numbers: Vec<u32> = Store::list(&self.store.slots_dir(), suffix)?.iter().filter_map(|n| n.parse().ok()).collect();
         numbers.sort_unstable();
         Ok(numbers)
     }
 
-    fn free_slots(&self) -> Result<Vec<u32>> {
+    pub(crate) fn free_slots(&self) -> Result<Vec<u32>> {
         let claimed = self.slot_numbers(".claim")?;
         Ok(self.slot_numbers(".json")?.into_iter().filter(|n| !claimed.contains(n)).collect())
     }
 
-    fn slot_path(&self, slot: u32) -> Result<PathBuf> {
+    pub(crate) fn slot_path(&self, slot: u32) -> Result<PathBuf> {
         Ok(Store::read_json::<SlotRecord>(&self.store.slot(slot))?
             .map(|record| record.path)
             .unwrap_or_else(|| self.slots_root().join(slot.to_string())))
     }
 
-    fn task(&self, task: &TaskName) -> Result<TaskRecord> {
+    pub(crate) fn task(&self, task: &TaskName) -> Result<TaskRecord> {
         Store::read_json(&self.store.task(task.as_str()))?.ok_or_else(|| Error::new(format!("no task {task}")))
     }
 
     /// Claims a slot for `owner`: one it already claimed, else a free one, else a new number.
-    fn claim_slot(&self, owner: &str) -> Result<u32> {
+    pub(crate) fn claim_slot(&self, owner: &str) -> Result<u32> {
         let claims = self.slot_numbers(".claim")?;
         for &n in &claims {
             if Store::read_text(&self.store.claim(n))?.as_deref() == Some(owner) {
@@ -63,7 +63,7 @@ impl Workspace {
     }
 
     /// Claims a slot number that has no checkout yet.
-    fn claim_new_slot(&self, owner: &str) -> Result<u32> {
+    pub(crate) fn claim_new_slot(&self, owner: &str) -> Result<u32> {
         let mut n = self.slot_numbers(".json")?.iter().chain(&self.slot_numbers(".claim")?).max().map_or(1, |m| m + 1);
         while !Store::create_new(&self.store.claim(n), owner.as_bytes())? {
             n += 1;
@@ -72,7 +72,7 @@ impl Workspace {
     }
 
     /// Makes sure slot `n` has a checkout, creating one detached at `base` when it has none.
-    fn ensure_slot_checkout(&self, n: u32, base: gix::ObjectId) -> Result<PathBuf> {
+    pub(crate) fn ensure_slot_checkout(&self, n: u32, base: gix::ObjectId) -> Result<PathBuf> {
         if let Some(record) = Store::read_json::<SlotRecord>(&self.store.slot(n))? {
             return Ok(record.path);
         }
@@ -85,7 +85,7 @@ impl Workspace {
         Ok(path)
     }
 
-    fn report(&self, record: &TaskRecord) -> Result<Value> {
+    pub(crate) fn report(&self, record: &TaskRecord) -> Result<Value> {
         let worktree = self.slot_path(record.slot)?;
         let hold = Store::read_json::<HoldRecord>(&self.store.hold(record.task.as_str()))?.map(|h| h.reason);
         Ok(json!({
@@ -96,11 +96,12 @@ impl Workspace {
             "stage": record.stage,
             "worktree": worktree,
             "hold": hold,
+            "finish": crate::finish::finish_report(self, &record.task)?,
         }))
     }
 }
 
-fn task_name(args: &mut Args) -> Result<TaskName> {
+pub(crate) fn task_name(args: &mut Args) -> Result<TaskName> {
     TaskName::try_from(args.positional("TASK")?).map_err(Error::new)
 }
 
@@ -113,6 +114,7 @@ pub fn begin(path: &Path, mut args: Args) -> Result<Value> {
     gix::refs::FullName::try_from(format!("refs/heads/{branch}"))?;
 
     let ws = Workspace::open(path)?;
+    crate::finish::housekeeping(&ws)?;
     let task_path = ws.store.task(task.as_str());
     let mut opened_slot = None;
     let mut record = match Store::read_json::<TaskRecord>(&task_path)? {
@@ -201,40 +203,58 @@ pub fn retire(path: &Path, mut args: Args) -> Result<Value> {
     let task = task_name(&mut args)?;
     args.finish()?;
     let ws = Workspace::open(path)?;
+    crate::finish::housekeeping(&ws)?;
+    retire_task(&ws, &task, None)?;
+    Ok(json!({ "task": task, "retired": true }))
+}
+
+/// Returns the task's slot to the free pool. Refuses anything that retiring would lose: changes in the checkout,
+/// untracked files, commits that are neither the base nor in the remote default branch, a finish still running,
+/// and with `expected_head` a checkout that moved past the commit a finish integrated.
+pub(crate) fn retire_task(ws: &Workspace, task: &TaskName, expected_head: Option<&str>) -> Result<()> {
     let task_path = ws.store.task(task.as_str());
     let Some(record) = Store::read_json::<TaskRecord>(&task_path)? else {
-        return Ok(json!({ "task": task, "retired": true }));
+        return Ok(());
     };
     if Store::read_json::<HoldRecord>(&ws.store.hold(task.as_str()))?.is_some() {
         return Err(Error::new(format!("task {task} is held; release the hold first")));
     }
-    {
-        let n = record.slot;
-        let worktree = ws.slot_path(n)?;
-        if worktree.join(".git").exists() {
-            let untracked_or_changed = repo::git(&worktree, &["status", "--porcelain", "--untracked-files=all"])?;
-            if !untracked_or_changed.is_empty() {
-                return Err(Error::new(format!("task {task} has uncommitted or untracked files in {}", worktree.display())));
-            }
-            let branch_ref = format!("refs/heads/{}", record.branch);
-            if let Ok(tip) = repo::git(&worktree, &["rev-parse", "--verify", "--quiet", &branch_ref]) {
-                let published = tip == record.base
-                    || repo::git(&worktree, &["merge-base", "--is-ancestor", &tip, "refs/remotes/origin/HEAD"]).is_ok();
-                if !published {
-                    return Err(Error::new(format!("task {task} has commits that are not in the remote default branch")));
-                }
-                repo::git(&worktree, &["switch", "--quiet", "--detach", &tip])?;
-                repo::git(&worktree, &["branch", "--quiet", "--delete", "--force", &record.branch])?;
-            }
+    if expected_head.is_none() && crate::finish::running(ws, task)? {
+        return Err(Error::new(format!("task {task} has a finish in progress")));
+    }
+    let n = record.slot;
+    let worktree = ws.slot_path(n)?;
+    if worktree.join(".git").exists() {
+        let untracked_or_changed = repo::git(&worktree, &["status", "--porcelain", "--untracked-files=all"])?;
+        if !untracked_or_changed.is_empty() {
+            return Err(Error::new(format!("task {task} has uncommitted or untracked files in {}", worktree.display())));
         }
-        Store::remove(&ws.store.hold(task.as_str()))?;
-        Store::remove(&task_path)?;
-        if Store::read_text(&ws.store.claim(n))?.as_deref() == Some(task.as_str()) {
-            Store::remove(&ws.store.claim(n))?;
+        let branch_ref = format!("refs/heads/{}", record.branch);
+        if let Ok(tip) = repo::git(&worktree, &["rev-parse", "--verify", "--quiet", &branch_ref]) {
+            if let Some(expected) = expected_head {
+                if tip != expected {
+                    return Err(Error::new(format!("task {task} has commits after the integrated {expected}; retire it after the next finish")));
+                }
+            }
+            let published = tip == record.base
+                || repo::git(&worktree, &["merge-base", "--is-ancestor", &tip, "refs/remotes/origin/HEAD"]).is_ok();
+            if !published {
+                return Err(Error::new(format!("task {task} has commits that are not in the remote default branch")));
+            }
+            repo::git(&worktree, &["switch", "--quiet", "--detach", &tip])?;
+            repo::git(&worktree, &["branch", "--quiet", "--delete", "--force", &record.branch])?;
         }
     }
+    Store::remove(&ws.store.hold(task.as_str()))?;
+    Store::remove(&ws.store.acceptance(task.as_str()))?;
+    Store::remove(&ws.store.progress(task.as_str()))?;
+    let _ = std::fs::remove_dir(ws.store.finishes_dir().join(task.as_str()));
+    Store::remove(&task_path)?;
+    if Store::read_text(&ws.store.claim(n))?.as_deref() == Some(task.as_str()) {
+        Store::remove(&ws.store.claim(n))?;
+    }
     spawn_detached(&ws.layout.main_worktree, &["__prepare-slot"]);
-    Ok(json!({ "task": task, "retired": true }))
+    Ok(())
 }
 
 pub fn status(path: &Path, mut args: Args) -> Result<Value> {
@@ -242,11 +262,11 @@ pub fn status(path: &Path, mut args: Args) -> Result<Value> {
     let only_requested = only.is_some();
     args.finish()?;
     let ws = Workspace::open(path)?;
+    crate::finish::housekeeping(&ws)?;
     let names = match only {
         Some(task) => vec![task],
         None => Store::list(&ws.store.tasks_dir(), ".json")?
             .into_iter()
-            .filter(|n| !n.ends_with(".hold"))
             .filter_map(|n| TaskName::try_from(n).ok())
             .collect(),
     };
@@ -259,11 +279,13 @@ pub fn status(path: &Path, mut args: Args) -> Result<Value> {
         }
     }
     let total = ws.slot_numbers(".json")?.len();
-    let background = background_running(&ws.store.prepare_lock());
+    let workers = ws.store.prepare_lock().with_file_name("");
+    let background = lock_held(&ws.store.prepare_lock())
+        || Store::list(&workers, ".lock")?.iter().any(|name| lock_held(&workers.join(format!("{name}.lock"))));
     Ok(json!({ "tasks": tasks, "slots": { "total": total, "free": ws.free_slots()?.len() }, "background": background }))
 }
 
-fn background_running(lock_path: &Path) -> bool {
+pub(crate) fn lock_held(lock_path: &Path) -> bool {
     match std::fs::OpenOptions::new().write(true).open(lock_path) {
         Ok(file) => matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
         Err(_) => false,
@@ -275,6 +297,7 @@ pub fn hold(path: &Path, mut args: Args) -> Result<Value> {
     let reason = args.required("reason")?;
     args.finish()?;
     let ws = Workspace::open(path)?;
+    crate::finish::housekeeping(&ws)?;
     ws.task(&task)?;
     Store::write_json(&ws.store.hold(task.as_str()), &HoldRecord { version: VERSION, reason: reason.clone() })?;
     Ok(json!({ "task": task, "hold": reason }))
@@ -285,6 +308,7 @@ pub fn release_hold(path: &Path, mut args: Args) -> Result<Value> {
     let decision = args.required("decision")?;
     args.finish()?;
     let ws = Workspace::open(path)?;
+    crate::finish::housekeeping(&ws)?;
     let hold_path = ws.store.hold(task.as_str());
     let hold = Store::read_json::<HoldRecord>(&hold_path)?.ok_or_else(|| Error::new(format!("task {task} has no hold")))?;
     Store::remove(&hold_path)?;
@@ -340,7 +364,7 @@ fn settle_index(worktree: &Path) {
     let _ = repo::git(worktree, &["update-index", "-q", "--refresh"]);
 }
 
-fn spawn_detached(repo: &Path, args: &[&str]) {
+pub(crate) fn spawn_detached(repo: &Path, args: &[&str]) {
     let Ok(exe) = std::env::current_exe() else { return };
     let mut command = Command::new(exe);
     command.arg("--repo").arg(repo).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());

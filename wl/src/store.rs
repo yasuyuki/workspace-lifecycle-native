@@ -18,8 +18,15 @@ impl Store {
     pub fn tasks_dir(&self) -> PathBuf { self.root.join("tasks") }
     pub fn slots_dir(&self) -> PathBuf { self.root.join("slots") }
     pub fn task(&self, task: &str) -> PathBuf { self.tasks_dir().join(format!("{task}.json")) }
-    pub fn hold(&self, task: &str) -> PathBuf { self.tasks_dir().join(format!("{task}.hold.json")) }
+    pub fn hold(&self, task: &str) -> PathBuf { self.root.join("holds").join(format!("{task}.json")) }
     pub fn slot(&self, slot: u32) -> PathBuf { self.slots_dir().join(format!("{slot}.json")) }
+    pub fn finishes_dir(&self) -> PathBuf { self.root.join("finishes") }
+    pub fn acceptance(&self, task: &str) -> PathBuf { self.finishes_dir().join(task).join("accept.json") }
+    pub fn progress(&self, task: &str) -> PathBuf { self.finishes_dir().join(task).join("progress.json") }
+    pub fn worker_lock(&self, task: &str) -> PathBuf { self.root.join("workers").join(format!("{task}.lock")) }
+    pub fn queue_dir(&self, target: &str) -> PathBuf { self.root.join("queue").join(target.replace('/', "%2F")) }
+    pub fn notices_dir(&self) -> PathBuf { self.root.join("notices") }
+    pub fn log(&self, task: &str, attempt: u32) -> PathBuf { self.root.join("logs").join(format!("{task}-{attempt}.log")) }
     pub fn prepare_lock(&self) -> PathBuf { self.root.join("workers").join("prepare.lock") }
     pub fn claim(&self, slot: u32) -> PathBuf { self.slots_dir().join(format!("{slot}.claim")) }
 
@@ -44,6 +51,10 @@ impl Store {
     }
 
     fn temp_beside(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
+        Self::temp_beside_flushed(path, bytes, false)
+    }
+
+    fn temp_beside_flushed(path: &Path, bytes: &[u8], flush: bool) -> Result<PathBuf> {
         let dir = path.parent().expect("state paths have a parent");
         fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
         let temp = dir.join(format!(
@@ -53,14 +64,25 @@ impl Store {
             TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         let mut file = fs::File::create(&temp).map_err(|e| Error::io(&temp, e))?;
-        // Not flushed to disk: a foreground write lost to a crash is rebuilt by running the command again.
+        // A foreground write is not flushed: one lost to a crash is rebuilt by running the command again.
         file.write_all(bytes).map_err(|e| Error::io(&temp, e))?;
+        if flush {
+            file.sync_all().map_err(|e| Error::io(&temp, e))?;
+        }
         Ok(temp)
     }
 
     /// Replaces `path` with `value` in one step; a reader sees the old or the new content.
     pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-        let temp = Self::temp_beside(path, &to_json(value))?;
+        Self::replace(path, Self::temp_beside(path, &to_json(value))?)
+    }
+
+    /// As `write_json`, flushed to disk first: background progress has no command to run again.
+    pub fn write_durable<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+        Self::replace(path, Self::temp_beside_flushed(path, &to_json(value), true)?)
+    }
+
+    fn replace(path: &Path, temp: PathBuf) -> Result<()> {
         let mut attempt = 0;
         loop {
             match fs::rename(&temp, path) {
@@ -107,6 +129,24 @@ impl Store {
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
             Err(e) => Err(Error::io(path, e)),
         }
+    }
+
+    /// Names of the directories in `dir`. A missing directory has none.
+    pub fn list_dirs(dir: &Path) -> Result<Vec<String>> {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(Error::io(dir, e)),
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| Error::io(dir, e))?;
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                names.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        names.sort();
+        Ok(names)
     }
 
     /// Names in `dir` ending with `suffix`, without the suffix. A missing directory has no entries.

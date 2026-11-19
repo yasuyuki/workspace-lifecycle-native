@@ -65,3 +65,60 @@ pub struct HoldRecord {
 
 /// Content of a slot claim file: the task that owns the slot, or a slot still being prepared.
 pub const PREPARING: &str = "#prepare";
+
+/// Written only by `wl finish`: the commit one finish attempt integrates.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Acceptance {
+    pub version: u32,
+    pub task: TaskName,
+    pub attempt: u32,
+    pub commit: String,
+    pub target: String,
+    pub retire: bool,
+    pub accepted_at_ms: u128,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Stage {
+    Accepted,
+    TopicPushed,
+    Prepared,
+    TargetPushed,
+    Integrated,
+    Retired,
+    NeedsAction,
+}
+
+impl Stage {
+    pub fn is_terminal(self, retire: bool) -> bool {
+        match self {
+            Stage::Retired | Stage::NeedsAction => true,
+            Stage::Integrated => !retire,
+            _ => false,
+        }
+    }
+}
+
+/// Written only by the worker of the task: how far the attempt got.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Progress {
+    pub version: u32,
+    pub task: TaskName,
+    pub attempt: u32,
+    pub stage: Stage,
+    /// The commit prepared for the target: the accepted commit when it fast-forwards, else a merge commit.
+    pub merged: Option<String>,
+    /// The target commit the preparation started from.
+    pub target_base: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// Created by the worker; the next command that reports it deletes it.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Notice {
+    pub task: TaskName,
+    pub attempt: u32,
+    pub stage: Stage,
+    pub message: String,
+}

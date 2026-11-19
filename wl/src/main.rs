@@ -1,5 +1,7 @@
 mod commands;
+mod config;
 mod error;
+mod finish;
 mod model;
 mod repo;
 mod store;
@@ -14,6 +16,7 @@ const USAGE: &str = "usage:
   wl [--repo PATH] status [TASK]
   wl [--repo PATH] hold TASK --reason TEXT
   wl [--repo PATH] release-hold TASK --decision REF
+  wl [--repo PATH] finish TASK [--retire]
   wl [--repo PATH] retire TASK";
 
 pub struct Args {
@@ -45,6 +48,17 @@ impl Args {
         }
     }
 
+    fn flag(&mut self, name: &str) -> bool {
+        let flag = format!("--{name}");
+        match self.rest.iter().position(|a| *a == flag) {
+            Some(i) => {
+                self.rest.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
     fn required(&mut self, name: &str) -> Result<String> {
         self.option(name)?.ok_or_else(|| Error::new(format!("--{name} is required\n{USAGE}")))
     }
@@ -64,6 +78,8 @@ fn run() -> Result<serde_json::Value> {
         "hold" => commands::hold(&repo, args),
         "release-hold" => commands::release_hold(&repo, args),
         "retire" => commands::retire(&repo, args),
+        "finish" => finish::finish(&repo, args),
+        "__work" => finish::work(&repo, args),
         "__prepare-slot" => commands::prepare_slot(&repo, args),
         "--help" | "-h" | "help" => {
             println!("{USAGE}");
@@ -82,11 +98,20 @@ fn main() -> ExitCode {
     match result {
         Ok(mut value) => {
             value["ok"] = true.into();
+            let notices = finish::take_notices();
+            if !notices.is_empty() {
+                value["notices"] = serde_json::to_value(notices).expect("notices serialize");
+            }
             println!("{value}");
             ExitCode::SUCCESS
         }
         Err(error) => {
-            println!("{}", serde_json::json!({ "ok": false, "error": error.to_string() }));
+            let mut value = serde_json::json!({ "ok": false, "error": error.to_string() });
+            let notices = finish::take_notices();
+            if !notices.is_empty() {
+                value["notices"] = serde_json::to_value(notices).expect("notices serialize");
+            }
+            println!("{value}");
             ExitCode::from(2)
         }
     }
