@@ -204,3 +204,23 @@ fn commands_run_from_inside_a_slot_find_the_same_tasks() {
     assert_eq!(wl(&worktree, &["hold", "alpha", "--reason", "x"])["ok"], true);
     assert_eq!(wl(&f.main, &["status", "alpha"])["tasks"][0]["hold"], "x");
 }
+
+#[test]
+fn retire_keeps_the_declared_slot_cache_and_removes_other_ignored_files() {
+    let f = fixture();
+    let first = wl(&f.main, &["begin", "alpha", "--request", "r"]);
+    let worktree = PathBuf::from(first["worktree"].as_str().unwrap());
+    std::fs::write(worktree.join(".gitignore"), "target/\nscratch/\n").unwrap();
+    std::fs::write(worktree.join(".lifecycle.toml"), "slot_cache = [\"target\"]\n").unwrap();
+    git(&worktree, &["add", ".gitignore", ".lifecycle.toml"]);
+    git(&worktree, &["commit", "-q", "-m", "declare the cache"]);
+    git(&worktree, &["push", "-q", "origin", "HEAD:main"]);
+    git(&f.main, &["fetch", "-q", "origin"]);
+    for dir in ["target", "scratch"] {
+        std::fs::create_dir_all(worktree.join(dir)).unwrap();
+        std::fs::write(worktree.join(dir).join("out"), "x").unwrap();
+    }
+    assert_eq!(wl(&f.main, &["retire", "alpha"])["ok"], true);
+    assert!(worktree.join("target/out").exists(), "the slot cache stays");
+    assert!(!worktree.join("scratch").exists(), "other ignored files go");
+}

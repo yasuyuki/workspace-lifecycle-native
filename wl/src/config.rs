@@ -8,9 +8,8 @@ use std::path::PathBuf;
 pub struct RepoConfig {
     #[serde(default)]
     pub validation: Vec<ValidationStep>,
-    /// Ignored paths a slot keeps for the next task (P4).
+    /// Ignored paths a slot keeps for the next task, such as `target`.
     #[serde(default)]
-    #[allow(dead_code)]
     pub slot_cache: Vec<String>,
 }
 
@@ -68,6 +67,18 @@ pub fn required_checks(repo: &gix::Repository, commit: gix::ObjectId) -> Result<
 pub struct MachineConfig {
     #[serde(default)]
     pub preflight: Vec<String>,
+    /// Where `any` validation steps run (ADR 0007, 0014). Absent, they run on this machine.
+    #[serde(default)]
+    pub offload: Option<Offload>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Offload {
+    /// Runs the argv that follows it in the offload host, such as `["wsl.exe", "-d", "ubuntu-26-development", "-u", "wl", "--"]`.
+    pub prefix: Vec<String>,
+    /// A directory on the offload host's own file system, never under `/mnt/c`.
+    pub root: String,
 }
 
 pub fn machine_config_path() -> Option<PathBuf> {

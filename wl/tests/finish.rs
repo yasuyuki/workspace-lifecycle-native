@@ -282,3 +282,35 @@ fn the_target_waits_for_required_checks_and_a_failed_check_needs_action() {
     assert_eq!(f.origin_main(), before);
     let _ = worktree;
 }
+
+#[cfg(unix)]
+#[test]
+fn any_steps_run_in_the_offload_directory_with_fresh_file_times_and_windows_steps_run_here() {
+    let probe = "import os, sys; open(sys.argv[1], 'a').write(os.getcwd() + ' ' + os.environ.get('WL_OFFLOADED', 'here') + ' ' + str(os.path.getmtime('a.txt')) + '\\n')";
+    let dir = tempfile::tempdir().unwrap();
+    let record = dir.path().join("record.txt");
+    let toml = format!(
+        "[[validation]]\nargv = [\"{PYTHON}\", \"-c\", {probe:?}, {record:?}]\nwhere = \"any\"\n\n[[validation]]\nargv = [\"{PYTHON}\", \"-c\", {probe:?}, {record:?}]\nwhere = \"windows\"\n",
+        record = record.display().to_string()
+    );
+    let f = Fixture::new(Some(&toml));
+    let offload_root = dir.path().join("offload");
+    let config = serde_json::json!({
+        "preflight": [PYTHON, f.dir.path().join("preflight.py"), "{repo}", f.decision],
+        "offload": { "prefix": ["env", "WL_OFFLOADED=offloaded"], "root": offload_root },
+    });
+    std::fs::write(f.dir.path().join("config.json"), config.to_string()).unwrap();
+    f.begin_with_commit("alpha", "b.txt", "b\n");
+    let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+    f.wl(&["finish", "alpha"]);
+    f.wait_for("alpha", "integrated");
+    let lines: Vec<String> = std::fs::read_to_string(&record).unwrap().lines().map(String::from).collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let any: Vec<&str> = lines[0].split(' ').collect();
+    assert_eq!(any[0], offload_root.join("product-main").display().to_string());
+    assert_eq!(any[1], "offloaded");
+    assert!(any[2].parse::<f64>().unwrap() >= started - 1.0, "files carry the time they were written, not the commit's: {lines:?}");
+    let windows: Vec<&str> = lines[1].split(' ').collect();
+    assert!(windows[0].ends_with("integrate-main"), "{lines:?}");
+    assert_eq!(windows[1], "here");
+}

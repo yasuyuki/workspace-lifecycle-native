@@ -244,6 +244,7 @@ pub(crate) fn retire_task(ws: &Workspace, task: &TaskName, expected_head: Option
             repo::git(&worktree, &["switch", "--quiet", "--detach", &tip])?;
             repo::git(&worktree, &["branch", "--quiet", "--delete", "--force", &record.branch])?;
         }
+        clear_ignored(&worktree)?;
     }
     Store::remove(&ws.store.hold(task.as_str()))?;
     Store::remove(&ws.store.acceptance(task.as_str()))?;
@@ -254,6 +255,21 @@ pub(crate) fn retire_task(ws: &Workspace, task: &TaskName, expected_head: Option
         Store::remove(&ws.store.claim(n))?;
     }
     spawn_detached(&ws.layout.main_worktree, &["__prepare-slot"]);
+    Ok(())
+}
+
+/// Removes the slot's ignored files except the slot cache its `.lifecycle.toml` declares (ADR 0015), so the next
+/// task starts with only what the repository chose to keep.
+fn clear_ignored(worktree: &Path) -> Result<()> {
+    let slot = repo::open(worktree)?;
+    let head = slot.head_id()?.detach();
+    let cache = crate::config::repo_config(&slot, head)?.slot_cache;
+    // A pathspec exclusion does not keep an ignored directory from `clean -X`; an un-ignoring pattern does.
+    let mut args: Vec<String> = ["clean", "--quiet", "-d", "--force", "--force", "-X"].map(String::from).to_vec();
+    for path in &cache {
+        args.extend(["-e".into(), format!("!/{}", path.trim_matches('/'))]);
+    }
+    repo::git(worktree, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
     Ok(())
 }
 

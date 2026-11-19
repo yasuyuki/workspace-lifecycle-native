@@ -1,6 +1,6 @@
 //! `wl finish` accepts a commit and returns; a detached worker integrates it (ADR 0005, 0006, 0011).
 use crate::commands::{Workspace, lock_held, retire_task, spawn_detached, task_name};
-use crate::config::{self, RequiredCheck};
+use crate::config::{self, RequiredCheck, Where};
 use crate::error::{Error, Result};
 use crate::model::{Acceptance, HoldRecord, Notice, Progress, Stage, TaskName, TaskRecord, TaskStage, VERSION};
 use crate::repo;
@@ -330,10 +330,56 @@ impl Worker<'_> {
         let id: gix::ObjectId = merged.parse().map_err(|e| Error::new(format!("{e}")))?;
         let steps = config::repo_config(&repo::open_refs_only(&self.ws.layout.main_worktree)?, id)?.validation;
         let log_path = self.ws.store.log(self.task().as_str(), self.acceptance.attempt);
+        let offload = config::machine_config()?.offload;
+        let mut exported: Option<String> = None;
         for (i, step) in steps.iter().enumerate() {
-            run_logged(&path, &step.argv, &log_path).map_err(|e| Error::new(format!("validation step {} {:?} failed: {e}", i + 1, step.argv)))?;
+            let ran = match (&offload, step.r#where) {
+                (Some(offload), Where::Any) => {
+                    let dir = match &exported {
+                        Some(dir) => dir.clone(),
+                        None => exported.insert(self.export(offload, &merged)?).clone(),
+                    };
+                    let mut argv = offload.prefix.clone();
+                    argv.extend(["sh".into(), "-c".into(), "cd \"$1\" && shift && exec \"$@\"".into(), "sh".into(), dir]);
+                    argv.extend(step.argv.iter().cloned());
+                    run_logged(&path, &argv, &log_path)
+                }
+                _ => run_logged(&path, &step.argv, &log_path),
+            };
+            ran.map_err(|e| Error::new(format!("validation step {} {:?} failed: {e}", i + 1, step.argv)))?;
         }
         Ok((base, merged))
+    }
+
+    /// Writes the prepared commit's files into the offload host's directory for this repository and target. The
+    /// directory's path stays the same so the host's build caches keep it; `tar -m` gives every file the current
+    /// time, because the commit time is older than the last build and cargo would take changed sources as fresh.
+    fn export(&self, offload: &config::Offload, commit: &str) -> Result<String> {
+        let name = self.ws.layout.main_worktree.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let dir = format!("{}/{}-{}", offload.root.trim_end_matches('/'), name, self.acceptance.target.replace('/', "-"));
+        let mut archive = Command::new("git")
+            .args(["-c", "gc.auto=0", "-C"])
+            .arg(&self.ws.layout.main_worktree)
+            .args(["archive", "--format=tar", commit])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| Error::new(format!("cannot start git archive: {e}")))?;
+        let mut unpack = Command::new(&offload.prefix[0]);
+        unpack
+            .args(&offload.prefix[1..])
+            .args(["sh", "-c", "rm -rf \"$1\" && mkdir -p \"$1\" && tar -x -m -C \"$1\"", "sh", &dir])
+            .stdin(archive.stdout.take().expect("piped stdout"));
+        let output = unpack.output().map_err(|e| Error::new(format!("cannot start the offload: {e}")))?;
+        let archived = archive.wait().map_err(|e| Error::new(format!("git archive: {e}")))?;
+        if !archived.success() {
+            return Err(Error::new(format!("git archive {commit} failed")));
+        }
+        if !output.status.success() {
+            return Err(Error::new(format!("cannot write the commit to the offload host: {}", String::from_utf8_lossy(&output.stderr).trim())));
+        }
+        Ok(dir)
     }
 
     /// Pushes the prepared commit once the topic checks pass and the target has not moved; else prepares again.

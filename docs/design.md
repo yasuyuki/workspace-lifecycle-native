@@ -83,16 +83,19 @@ stateDiagram-v2
 
 ## WSL offload
 
-1. worker は、確定した commit または merge commit を `git archive` で書き出し、`wsl.exe -d ubuntu-26-development -u <offload user>` で WSL 内の offload slot へ展開する。
-2. offload slot は repository ごとに path が固定されているので、cargo の build-dir はそのまま再利用される。
-3. 宣言された command を実行し、終了 code と log を Windows 側の state に戻す。
+user ごとの設定 file の `offload` に、WSL で command を実行する前置き（例 `["wsl.exe", "-d", "ubuntu-26-development", "-u", "wl", "--"]`）と、WSL 内の root を書く。設定が無ければ、`any` の手順も Windows で走る。
+
+1. worker は、merge 済みの commit を `git archive` で書き出し、前置きを通して WSL 内の `<root>/<repository>-<統合先>` へ展開する。展開の前に、前の内容は消す。
+2. 展開は `tar -m` で行い、file の時刻を展開した時刻にする。archive の時刻は commit の時刻で、前回の build より古いので、cargo は変わった source を新しくないと判断してしまう。
+3. directory の path は repository と統合先ごとに固定なので、WSL 側の cargo の build-dir（path ごとに分かれる）は前回の build を再利用する。
+4. 宣言された command をその directory で実行し、出力は Windows 側の log に残す。
 
 `/mnt/c` を経由する読み書きはしない。offload する手順は commit の内容だけを入力にする。
 
 ## slot
 
 - `begin` は空いている slot を割り当てる。
-- 退役は、宣言された slot cache を除く ignored data と未追跡 file を消してから、slot を base の HEAD に戻して空きにする。commit されていない内容があるときは、消す前に recovery copy を作る（ADR 0005）。
+- 退役は、commit されていない変更、未追跡の file、統合先に無い commit のどれかがあれば拒否する。拒否しなければ、宣言された slot cache を除く ignored data を消し、branch を消して slot を空きにする。失うものが無いときだけ退役するので、recovery copy は作らない。
 - 空きの slot は、background の準備が `origin` を fetch したうえで最新の base へ進めておく。準備の最後に、1 秒ほど置いてから index を更新する。checkout 直後の index は全 file を「racy」として扱い、次の変更確認が全 file の内容を読むからである。
 
 ## 移行
@@ -108,3 +111,4 @@ stateDiagram-v2
 - needs-action のときに Issue へコメントする option（ADR 0006）
 - 複数の finish をまとめて統合する merge train（ADR 0011）
 - push 判定の Rust への移植（ADR 0012）
+- background work が起動する git の回数の削減。Windows では、background work が process を作っている間、前景の command の起動も遅くなる（Issue #1 の P2 の記録）
