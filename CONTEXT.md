@@ -47,3 +47,11 @@ _Avoid_: validation argv、task の validator
 **Needs-action**:
 worker が自力で進められなくなった finish の状態。統合先を元に戻し、理由を記録して止まる。修正 commit を積んで finish を呼び直すと、そこから再開する。
 _Avoid_: 失敗、待機、pending
+
+**Slot**:
+repository ごとに持つ、path が固定された再利用の checkout。begin は空いている slot を一つの task に割り当て、退役はその slot を空きに戻す。task より長く残る。
+_Avoid_: task checkout の作成、worktree の新規作成
+
+**Slot cache**:
+slot に残す ignored data のうち、repository が cache として宣言した path（cargo の target など）。slot を空きに戻しても消さず、次の task が使う。宣言の無い ignored data は、空きに戻すときに消す。
+_Avoid_: target ignored data、作業の残り
