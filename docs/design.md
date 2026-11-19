@@ -27,12 +27,18 @@ Git の読取りは gix でプロセス内から行う。設定は system、appl
 
 | file | 書く主体 | 内容 |
 |---|---|---|
-| `tasks/<task>.json` | その task の command と worker | task、slot、確定した commit、finish の段階、needs-action の理由、通知済みの印 |
+| `tasks/<task>.json` | begin と退役 | task、slot、branch、base |
+| `holds/<task>.json` | hold と release-hold | hold の理由 |
+| `finishes/<task>/accept.json` | `wl finish` | 試行の番号、確定した commit、統合先、`--retire` |
+| `finishes/<task>/progress.json` | その task の worker | 試行の段階、merge commit、統合を始めた統合先の commit、needs-action の理由 |
+| `notices/<task>-<試行>-<段階>.json` | worker が作り、表示した command が消す | 統合、退役、needs-action の知らせ |
 | `slots/<n>.json` | begin と退役 | slot の path、割当て先の task または空き |
 | `queue/<target>/<受付時刻>-<task>` | finish acceptance が作り、worker が消す | 統合先ごとの受付順 |
 | `workers/<task>.lock` | worker | OS の file lock。worker が落ちると lock も外れる |
 
-repository が管理する宣言は `.lifecycle.toml` に置く。validation の手順と各手順の offload declaration（ADR 0007、0010）、required check、slot cache の path（ADR 0015）である。worker は確定した commit に含まれる版を読む。
+repository が管理する宣言は `.lifecycle.toml` に置く。validation の手順と各手順の offload declaration（ADR 0007、0010）、slot cache の path（ADR 0015）である。required check は、legacy lifecycle と同じ `.github/required-checks.json` を読む。worker はどちらも確定した commit に含まれる版を読む。
+
+push preflight の argv は private policy の path を含むので repository に置かず、user ごとの設定 file（Windows は `%LOCALAPPDATA%\wl\config.json`、`WL_CONFIG` で上書き）に `{"preflight": [..., "{repo}", ...]}` として置く。
 
 ## command
 
@@ -67,7 +73,10 @@ stateDiagram-v2
     NeedsAction --> Accepted: 修正 commit の後の wl finish
 ```
 
-- topic の required check と、統合先での merge と validation は並行に進む。
+- topic へ push するのは、受付で確定した commit である。push preflight は task の branch がある slot で実行し、その判定した宛先へ push する。受付の後に積まれた commit は次の finish の対象になる。
+- 統合先への push は、upstream を統合先にした branch `wl-integrate-<統合先>` を持つ integration worktree から行う。push preflight はこの upstream から宛先を統合先と判定し、default branch の policy を適用する。
+- 統合先ごとの順番は、受付順の file で決まる。順番を持つのは merge の準備から統合先への push までで、統合先の required check を待つ間は次の task に譲る。
+- topic の required check と、統合先での merge と validation は並行に進む。確定した commit が統合先に含まれていれば、validation はしない。
 - 統合先が先行の統合で進んだら、merge commit を作り直して validation をやり直す（ADR 0011）。
 - needs-action では、integration worktree を準備前に戻し、理由を記録して worker を終える。remote の統合先は push の前なので変わらない。
 - 結果は、次の command の先頭と `wl status` に出す。needs-action のときは Windows のトースト通知も出す（ADR 0006）。
