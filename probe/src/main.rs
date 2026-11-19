@@ -34,9 +34,10 @@ fn main() -> ExitCode {
         Some("spawn") => {
             let (name, n, cmd) = (&args[1], args[2].parse::<usize>().unwrap(), &args[3..]);
             let mut ms = Vec::with_capacity(n);
-            for _ in 0..n {
+            for i in 0..n {
+                let argv: Vec<String> = cmd.iter().map(|a| a.replace("{i}", &i.to_string())).collect();
                 let t = Instant::now();
-                let status = Command::new(&cmd[0]).args(&cmd[1..])
+                let status = Command::new(&argv[0]).args(&argv[1..])
                     .stdout(Stdio::null()).stderr(Stdio::null()).status()
                     .expect("spawn failed");
                 ms.push(t.elapsed().as_secs_f64() * 1e3);
