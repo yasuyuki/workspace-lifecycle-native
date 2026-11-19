@@ -253,6 +253,19 @@ fn spawn_detached(repo: &Path, args: &[&str]) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation};
+        use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+        // Windows hands every inheritable handle to a child. Without this, the caller reading our stdout
+        // would wait until the detached child exits.
+        for std_handle in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            // SAFETY: GetStdHandle and SetHandleInformation only read and flag this process's own handles.
+            unsafe {
+                let handle = GetStdHandle(std_handle);
+                if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                    SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+                }
+            }
+        }
         const DETACHED_PROCESS: u32 = 0x8;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
         const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
@@ -260,6 +273,7 @@ fn spawn_detached(repo: &Path, args: &[&str]) {
         if command.spawn().is_ok() {
             return;
         }
+        // A job that forbids breakaway refuses the flag; the child then stays in the caller's job.
         command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
     #[cfg(unix)]

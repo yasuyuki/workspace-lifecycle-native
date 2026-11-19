@@ -1,6 +1,40 @@
 use crate::error::{Error, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static SET_EXEPATH: AtomicBool = AtomicBool::new(false);
+
+/// gix finds Git for Windows' system configuration and attributes by launching git once per process,
+/// unless `EXEPATH` names the Git root as it does inside Git Bash. Sets it from a per-user cache.
+/// Must run before any thread starts.
+pub fn prepare_environment() {
+    #[cfg(windows)]
+    {
+        if std::env::var_os("EXEPATH").is_some() {
+            return;
+        }
+        let Some(cache) = std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("wl").join("git-root")) else { return };
+        let usable = |root: &Path| ["clangarm64", "ucrt64", "mingw64", "mingw32"].iter().filter(|c| root.join(c).is_dir()).count() == 1;
+        let cached = std::fs::read_to_string(&cache).ok().map(|s| PathBuf::from(s.trim())).filter(|r| usable(r));
+        let root = cached.or_else(|| {
+            let exec_path = Command::new("git").arg("--exec-path").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+            let exec_path = PathBuf::from(String::from_utf8(exec_path.stdout).ok()?.trim());
+            let root = exec_path.ancestors().find(|p| p.file_name().is_some_and(|n| n == "libexec"))?.parent()?.parent()?.to_path_buf();
+            if !usable(&root) {
+                return None;
+            }
+            let _ = std::fs::create_dir_all(cache.parent()?);
+            let _ = std::fs::write(&cache, root.to_string_lossy().as_bytes());
+            Some(root)
+        });
+        if let Some(root) = root {
+            // SAFETY: called at the start of main, before any other thread exists.
+            unsafe { std::env::set_var("EXEPATH", root) };
+            SET_EXEPATH.store(true, Ordering::Relaxed);
+        }
+    }
+}
 
 /// Opens a repository with the configuration files Git reads, but without configuration from environment variables.
 pub fn open(path: &Path) -> Result<gix::Repository> {
@@ -46,11 +80,12 @@ pub fn resolve_base(repo: &gix::Repository, spec: Option<&str>) -> Result<gix::O
 }
 
 pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .stdin(Stdio::null())
+    let mut command = Command::new("git");
+    command.arg("-C").arg(dir).args(args).stdin(Stdio::null());
+    if SET_EXEPATH.load(Ordering::Relaxed) {
+        command.env_remove("EXEPATH");
+    }
+    let output = command
         .output()
         .map_err(|e| Error::new(format!("cannot start git: {e}")))?;
     if output.status.success() {

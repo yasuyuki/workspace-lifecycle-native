@@ -71,6 +71,7 @@ fn run() -> Result<serde_json::Value> {
 }
 
 fn main() -> ExitCode {
+    repo::prepare_environment();
     match run() {
         Ok(mut value) => {
             value["ok"] = true.into();
