@@ -128,8 +128,9 @@ pub(crate) fn take_notices() -> Vec<Notice> {
     std::mem::take(&mut NOTICES.lock().unwrap())
 }
 
-/// Run by every command: restarts the worker of a finish whose worker is gone, and hands over the notices.
+/// Run by every command: reclaims orphan slot claims, restarts any worker whose lock dropped, and hands over notices.
 pub(crate) fn housekeeping(ws: &Workspace) -> Result<()> {
+    ws.reclaim_orphan_claims()?;
     for task in Store::list_dirs(&ws.store.finishes_dir())? {
         let Ok(task) = TaskName::try_from(task) else { continue };
         if running(ws, &task)? && !lock_held(&ws.store.worker_lock(task.as_str())) {
