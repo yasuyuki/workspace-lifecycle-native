@@ -1,4 +1,4 @@
-"""Model-check FinishIntegration.tla with TLC across passing and known-bug configs.
+"""Model-check FinishIntegration.tla with TLC across all finish configurations.
 
 Exit 0 when every configuration matches EXPECTED (and, with --mutants, every
 mutant breaks its expected invariant); 1 on mismatch; 2 when TLC cannot run.
@@ -18,13 +18,13 @@ MODEL = Path(__file__).resolve().parents[1] / "model"
 SPEC = "FinishIntegration.tla"
 TLC_VERSION = "TLC2 Version 2.19 of 08 August 2024"
 
-# None: every invariant holds. A rule name: TLC reports that invariant violated.
+# None: every invariant holds.
 EXPECTED = {
     "single-task-gated": None,
     "single-task-ungated": None,
-    "two-tasks-crash-queue": "ExclusiveIntegrationWorktree",
-    "two-tasks-accept-race": "ExclusiveIntegrationWorktree",
-    "two-tasks-suffix": "QueueEntryMatchesOwner",
+    "two-tasks-crash-queue": None,
+    "two-tasks-accept-race": None,
+    "two-tasks-suffix": None,
 }
 
 # (name, code location, config, expected violated rule, original TLA+ text, broken TLA+ text)
@@ -42,8 +42,8 @@ MUTANTS = [
         "wl/src/finish.rs Worker::step() Stage::TargetPushed wait_for_checks(merged)",
         "single-task-gated",
         "IntegratedChecksPassed",
-        '     IN IF ~Gated \\/ (mSrc \\in TargetCommits /\\ ciTarget[mSrc] = "success")',
-        "     IN IF TRUE",
+        '        /\\ IF ~Gated \\/ (mSrc \\in TargetCommits /\\ ciTarget[mSrc] = "success")',
+        '        /\\ IF TRUE',
     ),
     (
         "worker skips validation in integrate-target",
@@ -92,6 +92,30 @@ MUTANTS = [
         "NoUnpublishedOrDirtyRetire",
         "     IN IF ~hold[t] /\\ ~dirty[t] /\\ cur = accept[t].commit /\\ Published(cur)",
         "     IN IF ~hold[t] /\\ ~dirty[t]",
+    ),
+    (
+        "queue_entry_task falls back to ends_with suffix match",
+        "wl/src/finish.rs queue_entry_task() split_once('-')",
+        "two-tasks-suffix",
+        "QueueEntryMatchesOwner",
+        "  IF TRUE \\* Mutant hook: split_once('-') exact owner match instead of ends_with suffix",
+        "  IF FALSE \\* Mutant hook: split_once('-') exact owner match instead of ends_with suffix",
+    ),
+    (
+        "prepare() skips integration_lock mutual exclusion",
+        "wl/src/finish.rs prepare() lock_integration()",
+        "two-tasks-accept-race",
+        "ExclusiveIntegrationWorktree",
+        "  /\\ IF TRUE \\* Mutant hook: prepare() acquires integration_lock",
+        "  /\\ IF FALSE \\* Mutant hook: prepare() acquires integration_lock",
+    ),
+    (
+        "push_target() skips integration_lock mutual exclusion",
+        "wl/src/finish.rs push_target() lock_integration()",
+        "two-tasks-accept-race",
+        "ExclusiveIntegrationWorktree",
+        "  /\\ IF TRUE \\* Mutant hook: push_target() acquires integration_lock",
+        "  /\\ IF FALSE \\* Mutant hook: push_target() acquires integration_lock",
     ),
 ]
 
@@ -169,7 +193,7 @@ def main() -> int:
                     print(json.dumps({"mutant": name, "error": "model text not found once; update MUTANTS"}))
                     ok = False
                     continue
-                spec.write_bytes(text.replace(old, new).encode("utf-8"))
+                spec.write_bytes(text.replace(old, new, 1).encode("utf-8"))
                 result = run_tlc(args.java, args.tla2tools, copy, config)
             caught = result["violated"] == rule
             ok &= caught

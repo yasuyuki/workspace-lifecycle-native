@@ -16,35 +16,45 @@ stateDiagram-v2
   s1: 受付済み (Accepted)
   s2: topic push 済みと順番待ち
   s3: 統合先で merge と検証中
-  s4: 失敗処理中 (queue 解放)
-  s5: 要対応 (needs-action)
-  s6: 統合先で検証済み (Prepared)
-  s7: 統合先へ push 中
-  s8: 統合先へ push 済み (CI 待ち)
-  s9: 統合済み
-  s10: 退役済み
+  s4: 要対応を記録中
+  s5: 要対応記録済み (queue 解放中)
+  s6: 要対応 (needs-action)
+  s7: 統合先で検証済み (Prepared)
+  s8: 統合先へ push 中
+  s9: 再準備を記録中
+  s10: 統合先へ push 済み (queue 解放中)
+  s11: 統合先へ push 済み (CI 待ち)
+  s12: 統合済み
+  s13: 退役済み
   [*] --> s0
   s0 --> s1: wl finish
   s1 --> s2: 進捗 TopicPushed を記録
-  s2 --> s3: 順番を獲得し統合先へ入る
+  s2 --> s3: 順番と統合ロックを取得
   s3 --> s4: 検証失敗
   s4 --> s5: 要対応 (needs-action) を記録
-  s3 --> s6: 進捗 Prepared を記録
+  s5 --> s6: queue を削除
   s5 --> s1: wl finish
-  s6 --> s7: topic check 成功
-  s7 --> s8: 進捗 TargetPushed を記録
-  s7 --> s2: 進捗 TopicPushed を記録
-  s8 --> s9: 統合済みを記録
-  s9 --> s1: wl finish
-  s9 --> s10: 自動退役 (--retire)
+  s3 --> s7: 進捗 Prepared を記録
+  s6 --> s1: wl finish
+  s7 --> s8: push 用統合ロックを取得
+  s8 --> s9: 統合先が進み再準備
+  s8 --> s10: 進捗 TargetPushed を記録
+  s9 --> s2: 進捗 TopicPushed を記録
+  s10 --> s11: queue を削除
+  s11 --> s12: 統合済みを記録
+  s12 --> s1: wl finish
+  s12 --> s13: 自動退役 (--retire)
   class s0 blue
   class s1 purple
   class s2 purple
   class s3 purple
   class s4 orange
   class s5 orange
-  class s6 purple
+  class s6 orange
   class s7 purple
   class s8 purple
-  class s9 teal
-  class s10 teal
+  class s9 purple
+  class s10 purple
+  class s11 purple
+  class s12 teal
+  class s13 teal

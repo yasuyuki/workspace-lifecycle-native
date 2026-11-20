@@ -60,8 +60,9 @@ export const state = (v) => {
       return "開始済 (Claimed)";
     }
     if (v.rPc["a"] === "taskDeleted") return "退役処理中 (Task 削除済)";
-    if (c === "#prepare") return v.prepareLock ? "準備中 (prepare claim)" : "異常: stale prepare claim";
+    if (c === "#prepare") return v.prepareLock ? "準備中 (prepare claim)" : "stale prepare (回収待ち)";
     if (c === "a") return "claim 済 (Task 未記録)";
+    if (v.taskLock?.["a"] !== "none") return "begin ロック取得 (base 確認中)";
     return "空き (準備済)";
   }
 
@@ -77,7 +78,8 @@ export const group = (v) => {
     hasTaskWithoutClaim(v) ||
     hasOrphanClaim(v) ||
     hasStalePrepare(v) ||
-    v.prepareOverwroteSlot
+    v.prepareOverwroteSlot ||
+    v.badHousekeeping
   ) {
     return "attention";
   }
@@ -85,7 +87,9 @@ export const group = (v) => {
     const c = v.slotClaim["1"];
     const r = v.taskRec["a"];
     if (r.exists && r.stage === "ready") return "work";
-    if (r.exists || c === "a" || c === "#prepare" || v.rPc["a"] !== "idle") return "busy";
+    if (r.exists || c === "a" || c === "#prepare" || v.rPc["a"] !== "idle" || v.taskLock?.["a"] !== "none") {
+      return "busy";
+    }
     return "done";
   }
   return "work";
@@ -119,15 +123,17 @@ const actorLabel = (from, to) => {
 export const step = (action, from, to) => {
   const prefix = actorLabel(from, to);
   switch (action) {
-    case "BeginStartScan":
-    case "ChartBeginStartScan":
-      return `${prefix}begin 開始と claim 走査`;
+    case "BeginAcquireLock":
+    case "ChartAcquireLock":
+      return `${prefix}begin が task_lock 取得`;
+    case "BeginResolveAndScan":
+      return `${prefix}base 確認と claim 走査`;
+    case "BeginBaseError":
+      return `${prefix}resolve_base 失敗 (claim 前に解放)`;
     case "BeginCreateClaim":
       return `${prefix}claim 作成`;
     case "BeginWriteTask":
       return `${prefix}Task(Claimed) 書込`;
-    case "BeginBaseError":
-      return `${prefix}resolve_base 失敗 (claim 残留)`;
     case "BeginEnsureCheckout":
       return `${prefix}slot checkout 確認`;
     case "BeginSwitchAndReady":
@@ -147,6 +153,8 @@ export const step = (action, from, to) => {
       return "prepare_slot 完了 (claim 解放)";
     case "PrepareCrash":
       return "prepare_slot が claim 解放前に終了";
+    case "HousekeepingReclaim":
+      return "housekeeping が孤立 claim 回収";
     case "Done":
     case "ChartDone":
       return null;

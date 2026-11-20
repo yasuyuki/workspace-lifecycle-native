@@ -15,6 +15,7 @@ ChartInit ==
   /\ accept = [t \in Tasks |-> NoAccept]
   /\ prog = [t \in Tasks |-> NoProg]
   /\ queue = {}
+  /\ wtLock = None
   /\ wAlive = [t \in Tasks |-> FALSE]
   /\ wPc = [t \in Tasks |-> "idle"]
   /\ wStage = [t \in Tasks |-> "none"]
@@ -44,11 +45,11 @@ ChartCiTopicSucceeds ==
     /\ wPc["a"] = "checkTopicCI"
     /\ ciTopic' = [ciTopic EXCEPT ![c] = "success"]
     /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-                 queue, wAlive, wPc, wStage, wBase, wMerged, wFailReason,
-                 inWorktree, wtSrc, wtMergedValid, validatedOwn, validT,
-                 conflictC, preflightBad, ciTarget, tRemoteTip, tRemoteCommits,
-                 integratedInfo, retiredSnap, pushedWhileHeld, badQueueRemove,
-                 extPushed>>
+                 queue, wtLock, wAlive, wPc, wStage, wBase, wMerged,
+                 wFailReason, inWorktree, wtSrc, wtMergedValid, validatedOwn,
+                 validT, conflictC, preflightBad, ciTarget, tRemoteTip,
+                 tRemoteCommits, integratedInfo, retiredSnap, pushedWhileHeld,
+                 badQueueRemove, extPushed>>
 
 ChartCiTargetSucceeds ==
   \E m \in TargetCommits :
@@ -56,11 +57,11 @@ ChartCiTargetSucceeds ==
     /\ wPc["a"] = "waitTargetCI"
     /\ ciTarget' = [ciTarget EXCEPT ![m] = "success"]
     /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-                 queue, wAlive, wPc, wStage, wBase, wMerged, wFailReason,
-                 inWorktree, wtSrc, wtMergedValid, validatedOwn, validT,
-                 conflictC, preflightBad, ciTopic, tRemoteTip, tRemoteCommits,
-                 integratedInfo, retiredSnap, pushedWhileHeld, badQueueRemove,
-                 extPushed>>
+                 queue, wtLock, wAlive, wPc, wStage, wBase, wMerged,
+                 wFailReason, inWorktree, wtSrc, wtMergedValid, validatedOwn,
+                 validT, conflictC, preflightBad, ciTopic, tRemoteTip,
+                 tRemoteCommits, integratedInfo, retiredSnap, pushedWhileHeld,
+                 badQueueRemove, extPushed>>
 
 ChartExternalPush ==
   /\ wPc["a"] = "checkTopicCI"
@@ -76,14 +77,16 @@ ChartNext ==
   \/ WorkerStart("a")
   \/ WorkerPushTopic("a")
   \/ WorkerWaitTurn("a")
+  \/ WorkerPrepareAcquire("a")
   \/ WorkerPrepareMerge("a")
   \/ WorkerPrepareValidate("a")
   \/ WorkerCheckTopicCI("a")
+  \/ WorkerPushAcquire("a")
   \/ WorkerPushTarget("a")
   \/ WorkerTargetChecks("a")
   \/ WorkerRetire("a")
-  \/ WorkerWithdraw("a")
   \/ WorkerWriteStage("a")
+  \/ WorkerLeaveQueue("a")
   \/ ChartUserCommitFix
   \/ ChartCiTopicSucceeds
   \/ ChartCiTargetSucceeds

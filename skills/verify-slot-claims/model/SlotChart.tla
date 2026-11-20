@@ -10,16 +10,17 @@ ChartDone ==
   /\ pRan
   /\ UNCHANGED vars
 
-ChartBeginStartScan ==
+ChartAcquireLock ==
   /\ ~prepareLock
-  /\ BeginStartScan("a1")
+  /\ BeginAcquireLock("a1")
 
 ChartPrepareClaim ==
   /\ bPc["a1"] = "idle"
   /\ PrepareClaimSlot
 
 ChartNext ==
-  \/ ChartBeginStartScan
+  \/ ChartAcquireLock
+  \/ BeginResolveAndScan("a1")
   \/ BeginCreateClaim("a1")
   \/ BeginWriteTask("a1")
   \/ BeginEnsureCheckout("a1")

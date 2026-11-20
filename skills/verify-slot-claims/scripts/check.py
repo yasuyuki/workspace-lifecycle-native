@@ -1,4 +1,4 @@
-"""Model-check SlotClaims.tla with TLC across passing and known-bug configs.
+"""Model-check SlotClaims.tla with TLC across all slot-claim configurations.
 
 Exit 0 when every configuration matches EXPECTED (and, with --mutants, every
 mutant breaks its expected invariant); 1 on mismatch; 2 when TLC cannot run.
@@ -18,15 +18,15 @@ MODEL = Path(__file__).resolve().parents[1] / "model"
 SPEC = "SlotClaims.tla"
 TLC_VERSION = "TLC2 Version 2.19 of 08 August 2024"
 
-# None: every invariant holds. A rule name: TLC reports that invariant violated.
+# None: every invariant holds.
 EXPECTED = {
     "single-task-retire-guards": None,
     "two-tasks-concurrent": None,
-    "finding-begin-base-error": "NoOrphanClaimWhenIdle",
-    "finding-prepare-crash": "NoStalePrepareClaimWhenIdle",
-    "finding-retire-crash": "NoOrphanClaimWhenIdle",
-    "finding-same-task-begin-race": "AtMostOneClaimPerTask",
-    "finding-begin-retire-race": "TaskSlotMatchesClaim",
+    "finding-begin-base-error": None,
+    "finding-prepare-crash": None,
+    "finding-retire-crash": None,
+    "finding-same-task-begin-race": None,
+    "finding-begin-retire-race": None,
 }
 
 # (name, code location, config, expected violated rule, original TLA+ text, broken TLA+ text)
@@ -41,7 +41,7 @@ MUTANTS = [
     ),
     (
         "begin skips switch_slot branch checkout before writing Ready",
-        "wl/src/commands.rs begin() switch_slot() call (line 173)",
+        "wl/src/commands.rs begin() switch_slot() call (line 217)",
         "two-tasks-concurrent",
         "SlotBranchMatchesReadyTask",
         "        /\\ IF TRUE \\* Mutant hook: skip switch_slot before writing Ready",
@@ -57,7 +57,7 @@ MUTANTS = [
     ),
     (
         "retire_task removes claim before removing task record",
-        "wl/src/commands.rs retire_task() Store::remove order (lines 269-272)",
+        "wl/src/commands.rs retire_task() Store::remove order (lines 315-318)",
         "two-tasks-concurrent",
         "TaskSlotMatchesClaim",
         "  /\\ IF TRUE \\* Mutant hook: swap order so claim is removed BEFORE task record",
@@ -68,32 +68,72 @@ MUTANTS = [
         "wl/src/commands.rs retire_task() HoldRecord check",
         "single-task-retire-guards",
         "NoRetireUnsafeTask",
-        "  /\\ ~hold[t]",
-        "  /\\ TRUE",
+        "          /\\ ~hold[t]",
+        "          /\\ TRUE",
     ),
     (
         "retire_task skips finish running check",
         "wl/src/commands.rs retire_task() finish::running check",
         "single-task-retire-guards",
         "NoRetireUnsafeTask",
-        "  /\\ ~finishRunning[t]",
-        "  /\\ TRUE",
+        "          /\\ ~finishRunning[t]",
+        "          /\\ TRUE",
     ),
     (
         "retire_task skips dirty and untracked check",
         "wl/src/commands.rs retire_task() git status check",
         "single-task-retire-guards",
         "NoRetireUnsafeTask",
-        "  /\\ ~dirty[t]",
-        "  /\\ TRUE",
+        "          /\\ ~dirty[t]",
+        "          /\\ TRUE",
     ),
     (
         "retire_task skips published commit check",
         "wl/src/commands.rs retire_task() is_ancestor published check",
         "single-task-retire-guards",
         "NoRetireUnsafeTask",
-        "  /\\ ~unpublished[t]",
-        "  /\\ TRUE",
+        "          /\\ ~unpublished[t]",
+        "          /\\ TRUE",
+    ),
+    (
+        "begin() skips task_lock mutual exclusion across same-task begins",
+        "wl/src/commands.rs begin() lock_task(&task) (line 178)",
+        "finding-same-task-begin-race",
+        "AtMostOneClaimPerTask",
+        "     IN /\\ IF TRUE \\* Mutant hook: begin() acquires task_lock before checking task record",
+        "     IN /\\ IF FALSE \\* Mutant hook: begin() acquires task_lock before checking task record",
+    ),
+    (
+        "retire_task() skips task_lock mutual exclusion mid-begin",
+        "wl/src/commands.rs retire_task() lock_task(task) (line 269)",
+        "finding-begin-retire-race",
+        "TaskSlotMatchesClaim",
+        "  /\\ IF TRUE \\* Mutant hook: retire_task() acquires task_lock",
+        "  /\\ IF FALSE \\* Mutant hook: retire_task() acquires task_lock",
+    ),
+    (
+        "begin() claims slot before resolve_base()",
+        "wl/src/commands.rs begin() resolve_base before claim_slot (lines 183-185)",
+        "finding-begin-base-error",
+        "NoOrphanClaimWhenIdle",
+        "     IN IF TRUE \\* Mutant hook: resolve_base() fails BEFORE calling claim_slot()",
+        "     IN IF FALSE \\* Mutant hook: resolve_base() fails BEFORE calling claim_slot()",
+    ),
+    (
+        "reclaim_orphan_claims() skips stale #prepare reclamation",
+        "wl/src/commands.rs reclaim_stale_prepare_claims_locked() (lines 60-62, 91-95)",
+        "finding-prepare-crash",
+        "NoOrphanClaimAfterHousekeeping",
+        "         clearPrep == IF TRUE \\* Mutant hook: reclaim stale #prepare claims when prepare_lock is free",
+        "         clearPrep == IF FALSE \\* Mutant hook: reclaim stale #prepare claims when prepare_lock is free",
+    ),
+    (
+        "reclaim_orphan_task_claims() skips try_lock_exclusive(task_lock)",
+        "wl/src/commands.rs reclaim_orphan_task_claims() (lines 74-78)",
+        "two-tasks-concurrent",
+        "TaskSlotMatchesClaim",
+        "  /\\ LET clearTask == IF TRUE \\* Mutant hook: check task_lock before reclaiming orphan task claim",
+        "  /\\ LET clearTask == IF FALSE \\* Mutant hook: check task_lock before reclaiming orphan task claim",
     ),
 ]
 
