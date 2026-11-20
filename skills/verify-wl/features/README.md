@@ -6,8 +6,10 @@
 | WSL offload (`where = "any"`) | `wl finish` with `offload` configured in `WL_CONFIG` | not-run. Covered by `wl/tests/finish.rs` (`any_steps_run_in_the_offload_directory_...` on Unix). |
 | GitHub required checks | `wl finish` with `.github/required-checks.json` and `gh auth token` | not-run. Covered by `wl/tests/finish.rs` (`the_target_waits_for_required_checks_...` on Unix). |
 | Merge conflict & `needs-action` recovery | `wl finish` on conflicting target change, then resolution commit and second `wl finish` | not-run. Covered by `wl/tests/finish.rs`. |
-| Non-default `--target` and `--base` | `wl begin --target BRANCH --base REV` | not-run. Covered by `wl/tests/finish.rs`. |
+| Non-default `--target`, `--base`, and `--branch` | `wl begin --target BRANCH --base REV --branch NAME` | not-run. `--target` is covered by `wl/tests/finish.rs` and invalid `--base` failure cleanup by `wl/tests/cli.rs`; happy-path `--base` and `--branch` are untested. |
 | Windows toast notification | `wl` worker on `needs-action` | not-run |
 | Foreground latency benchmark | `wl` release binary p90 under 50 ms | not-run. Covered by `wl/tests/latency.rs` (`--ignored`). |
-| Concurrent finish & worker crash recovery | Multiple tasks finishing into one target or killed workers | not-run. Modeled by `skills/verify-finish-integration/`. |
+| Concurrent finish & worker crash recovery | Multiple tasks finishing into one target or killed workers | not-run. Covered by `wl/tests/finish.rs` and modeled by `skills/verify-finish-integration/`. |
+| Slot/claim concurrency & orphan/#prepare claim recovery | Concurrent `wl begin` / `wl retire`, failed `wl begin`, or crashed prepare/retire | not-run. Covered by `wl/tests/cli.rs` and modeled by `skills/verify-slot-claims/`. |
+| `wl finish` without `--retire` & uncommitted notice | `wl finish` on clean or dirty slot without `--retire`, and re-finish on `Integrated` | not-run. Uncommitted notice without `--retire` is covered by `wl/tests/finish.rs`; re-finish on `Integrated` is implemented in `wl/src/finish.rs` without a dedicated test. |
 | Other OS than the host running `verify.py` | `wl` on Windows vs Linux | not-run |

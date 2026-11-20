@@ -57,10 +57,12 @@ NOT_RUN = [
     "WSL offload (where = 'any')",
     "GitHub required checks polling and gh auth token",
     "merge conflict and needs-action fix-commit recovery",
-    "non-default --target and --base",
+    "non-default --target, --base, and --branch",
     "Windows toast notification",
     "release-mode latency p90 benchmark",
     "concurrent multi-task finish and worker crash recovery",
+    "slot/claim concurrency and orphan/#prepare claim recovery",
+    "wl finish without --retire (Integrated stage and uncommitted notice)",
     "other OS than the one running verify.py",
 ]
 
@@ -258,6 +260,7 @@ def run_verify(repo: Path, evidence_root: Path | None = None, doctor_only: bool 
         )
 
         help_proc = execute("wl help", [str(wl_bin), "help"], scratch, env=drive_env)
+        assertion("wl help exit 0", 0, help_proc.returncode)
         for sub in ("begin", "status", "hold", "release-hold", "finish", "retire"):
             assertion(f"help mentions {sub}", True, sub in help_proc.stdout)
 

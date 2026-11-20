@@ -9,11 +9,12 @@ explicitly retires it with `wl retire`.
 
 Contract sources:
 
-- `README.md` (`WL_CONFIG` / `config.json` preflight contract)
+- `README.md` (`%LOCALAPPDATA%\wl\config.json` preflight contract)
 - `CONTEXT.md` (Finish acceptance, Worker, Integration worktree, Needs-action, Slot, Slot cache)
-- `docs/design.md` (command behavior, finish stages, slot reuse and `clear_ignored`)
-- `wl/src/commands.rs` (`begin`, `hold`, `release_hold`, `retire`, `status`, `prepare_slot`)
-- `wl/src/finish.rs` (`finish`, `work`, `Worker::step`, `prepare`, `push_target`, `notify`)
+- `docs/design.md` (`WL_CONFIG`, command behavior, finish stages, slot reuse and `clear_ignored`)
+- `wl/src/commands.rs` (`begin`, `hold`, `release_hold`, `retire`, `retire_task`, `clear_ignored`, `status`, `prepare_slot`, `lock_task`, `claim_slot`, `switch_slot`, `reclaim_orphan_claims`)
+- `wl/src/finish.rs` (`finish`, `work`, `housekeeping`, `running`, `Worker::step`, `push_topic`, `wait_for_turn`, `leave_queue`, `queue_entry_task`, `needs_queue`, `lock_integration`, `prepare`, `push_target`, `notify`)
+- `wl/src/main.rs`, `wl/src/config.rs`, `wl/src/model.rs`, `wl/src/store.rs`
 - `wl/tests/cli.rs` and `wl/tests/finish.rs`
 
 ## Prerequisites
@@ -28,7 +29,7 @@ isolated `WL_CONFIG` / `HOME` / `GIT_CONFIG_GLOBAL`.
 
 | Step | Command and inputs | Expected observation |
 | --- | --- | --- |
-| Build | `cargo build --locked -p wl` on copied checkout | Built `wl` binary exists; `wl help` exits 2 or 0 and prints `begin`, `status`, `hold`, `release-hold`, `finish`, `retire`. |
+| Build | `cargo build --locked -p wl` on copied checkout | Built `wl` binary exists; `wl help` exits 0 and prints `begin`, `status`, `hold`, `release-hold`, `finish`, `retire`. |
 | Begin | `wl --repo product begin alpha --request verify/lifecycle` | Exit 0, `ok: true`, `stage: "ready"`, `branch: "alpha"`, `worktree` under `product.slots`, `product` remains on `main`. |
 | Hold & blocked finish | `wl --repo product hold alpha --reason "verify hold"`, then `wl --repo product finish alpha` | `hold` exits 0; `status alpha` reports `hold: "verify hold"`; `finish` exits 2 with `ok: false` and `"held"` in `error`; `origin/main` unchanged. |
 | Release hold | `wl --repo product release-hold alpha --decision verify/release` | Exit 0, `released: "verify hold"`; `status alpha` reports `hold: null`. |
