@@ -107,6 +107,20 @@ pub(crate) fn running(ws: &Workspace, task: &TaskName) -> Result<bool> {
     Ok(!progress.filter(|p| p.attempt == acceptance.attempt).is_some_and(|p| p.stage.is_terminal(acceptance.retire)))
 }
 
+fn queue_entry_task(entry: &str) -> Option<&str> {
+    entry.split_once('-').map(|(_, task)| task)
+}
+
+/// Whether `task` still needs its queue entry (before TargetPushed, NeedsAction, Integrated, or Retired is durable).
+fn needs_queue(ws: &Workspace, task: &TaskName) -> Result<bool> {
+    let Some(acceptance) = Store::read_json::<Acceptance>(&ws.store.acceptance(task.as_str()))? else {
+        return Ok(false);
+    };
+    let progress = Store::read_json::<Progress>(&ws.store.progress(task.as_str()))?
+        .filter(|p| p.attempt == acceptance.attempt);
+    Ok(matches!(progress.map(|p| p.stage), None | Some(Stage::Accepted | Stage::TopicPushed | Stage::Prepared)))
+}
+
 static NOTICES: std::sync::Mutex<Vec<Notice>> = std::sync::Mutex::new(Vec::new());
 
 /// The notices housekeeping handed over; the command prints them with its own result.
@@ -153,12 +167,9 @@ pub fn work(path: &Path, mut args: Args) -> Result<Value> {
     let task = task_name(&mut args)?;
     args.finish()?;
     let ws = Workspace::open(path)?;
-    let lock_path = ws.store.worker_lock(task.as_str());
-    std::fs::create_dir_all(lock_path.parent().unwrap()).map_err(|e| Error::io(&lock_path, e))?;
-    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&lock_path).map_err(|e| Error::io(&lock_path, e))?;
-    if lock.try_lock().is_err() {
+    let Some(_lock) = Store::try_lock_exclusive(&ws.store.worker_lock(task.as_str()))? else {
         return Ok(json!({ "skipped": "another worker runs this task" }));
-    }
+    };
     let acceptance: Acceptance = Store::read_json(&ws.store.acceptance(task.as_str()))?.ok_or_else(|| Error::new(format!("task {task} has no accepted finish")))?;
     let progress_path = ws.store.progress(task.as_str());
     let mut progress = Store::read_json::<Progress>(&progress_path)?
@@ -179,12 +190,15 @@ pub fn work(path: &Path, mut args: Args) -> Result<Value> {
         if let Err(error) = worker.step(&mut progress) {
             progress.stage = Stage::NeedsAction;
             progress.detail = Some(error.to_string());
-            worker.withdraw();
         }
         // Retiring removed the task's finish records; writing progress back would make a later task of the same name
         // read its first attempt as already retired.
         if progress.stage != Stage::Retired {
             Store::write_durable(&progress_path, &progress)?;
+        }
+        // Queue removal happens after durable progress is stored, so a crash beforehand cannot leave a running task unqueued.
+        if matches!(progress.stage, Stage::TargetPushed | Stage::NeedsAction) {
+            worker.leave_queue();
         }
         if progress.stage != before && matches!(progress.stage, Stage::Integrated | Stage::Retired | Stage::NeedsAction) {
             worker.notify(&progress)?;
@@ -228,6 +242,7 @@ impl Worker<'_> {
                 progress.stage = self.push_target(progress)?;
             }
             Stage::TargetPushed => {
+                self.leave_queue();
                 let merged: gix::ObjectId = progress.merged.as_deref().unwrap_or_default().parse().map_err(|e| Error::new(format!("recorded merge: {e}")))?;
                 let main = repo::open_refs_only(&self.ws.layout.main_worktree)?;
                 self.wait_for_checks(merged, &config::required_checks(&main, merged)?)?;
@@ -274,24 +289,27 @@ impl Worker<'_> {
         self.ws.store.queue_dir(&self.acceptance.target)
     }
 
-    /// Waits until this task's entry is the oldest for its target. An entry whose finish has ended is removed.
+    fn lock_integration(&self) -> Result<std::fs::File> {
+        Store::lock_exclusive(&self.ws.store.integration_lock(&self.acceptance.target))
+    }
+
+    /// Waits until this task's entry is the oldest for its target. An entry whose finish no longer needs the queue is removed.
     /// A worker resumed after a crash puts its entry back at its acceptance time, keeping its place.
     fn wait_for_turn(&self) -> Result<()> {
-        let suffix = format!("-{}", self.task());
-        let own = format!("{:020}{suffix}", self.acceptance.accepted_at_ms);
+        let own = format!("{:020}-{}", self.acceptance.accepted_at_ms, self.task());
         loop {
             let entries = Store::list(&self.queue(), "")?;
-            if !entries.iter().any(|e| e.ends_with(&suffix)) {
+            if !entries.iter().any(|e| queue_entry_task(e) == Some(self.task().as_str())) {
                 Store::create_new(&self.queue().join(&own), b"")?;
                 continue;
             }
             let first = &entries[0];
-            if first.ends_with(&suffix) {
+            if queue_entry_task(first) == Some(self.task().as_str()) {
                 return Ok(());
             }
-            let other = first.split_once('-').map(|(_, t)| t.to_owned()).unwrap_or_default();
+            let other = queue_entry_task(first).unwrap_or_default().to_owned();
             if let Ok(other) = TaskName::try_from(other) {
-                if !running(self.ws, &other)? {
+                if !needs_queue(self.ws, &other)? {
                     Store::remove(&self.queue().join(first))?;
                     continue;
                 }
@@ -301,9 +319,8 @@ impl Worker<'_> {
     }
 
     fn leave_queue(&self) {
-        let suffix = format!("-{}", self.task());
         if let Ok(entries) = Store::list(&self.queue(), "") {
-            for entry in entries.iter().filter(|e| e.ends_with(&suffix)) {
+            for entry in entries.iter().filter(|e| queue_entry_task(e) == Some(self.task().as_str())) {
                 let _ = Store::remove(&self.queue().join(entry));
             }
         }
@@ -335,6 +352,7 @@ impl Worker<'_> {
     /// Merges the accepted commit onto the target in the integration worktree and runs the validation there.
     /// Reads go through gix; git runs only to fetch, check out, clean and merge.
     fn prepare(&self) -> Result<(String, String)> {
+        let _integration_lock = self.lock_integration()?;
         let path = self.integration_worktree()?;
         let target_ref = format!("refs/remotes/origin/{}", self.acceptance.target);
         let main = repo::open_refs_only(&self.ws.layout.main_worktree)?;
@@ -422,13 +440,13 @@ impl Worker<'_> {
         if let Some(hold) = Store::read_json::<HoldRecord>(&self.ws.store.hold(self.task().as_str()))? {
             return Err(Error::new(format!("held before integration: {}", hold.reason)));
         }
+        let _integration_lock = self.lock_integration()?;
         let path = self.integration_worktree_unchanged()?;
         let target = &self.acceptance.target;
         repo::git(&path, &["fetch", "--quiet", "origin", &format!("+refs/heads/{target}:refs/remotes/origin/{target}")])?;
         let remote_tip = repo::resolve(&repo::open_refs_only(&path)?, &format!("refs/remotes/origin/{target}"))?.map(|id| id.to_string()).unwrap_or_default();
         let merged = progress.merged.clone().unwrap_or_default();
         if remote_tip == merged {
-            self.leave_queue();
             return Ok(Stage::TargetPushed);
         }
         if Some(&remote_tip) != progress.target_base.as_ref() {
@@ -441,7 +459,6 @@ impl Worker<'_> {
         if repo::git(&path, &["push", "--quiet", &remote, &format!("{merged}:refs/heads/{target}")]).is_err() {
             return Ok(Stage::TopicPushed);
         }
-        self.leave_queue();
         Ok(Stage::TargetPushed)
     }
 
@@ -493,15 +510,6 @@ impl Worker<'_> {
             }
             std::thread::sleep(CHECK_POLL);
         }
-    }
-
-    fn withdraw(&self) {
-        if let Ok(path) = self.integration_worktree_unchanged() {
-            if path.join(".git").exists() {
-                repo::git(&path, &["merge", "--abort"]).ok();
-            }
-        }
-        self.leave_queue();
     }
 
     fn notify(&self, progress: &Progress) -> Result<()> {

@@ -25,6 +25,8 @@ impl Store {
     pub fn progress(&self, task: &str) -> PathBuf { self.finishes_dir().join(task).join("progress.json") }
     pub fn worker_lock(&self, task: &str) -> PathBuf { self.root.join("workers").join(format!("{task}.lock")) }
     pub fn queue_dir(&self, target: &str) -> PathBuf { self.root.join("queue").join(target.replace('/', "%2F")) }
+    pub fn task_lock(&self, task: &str) -> PathBuf { self.root.join("locks").join(format!("{task}.lock")) }
+    pub fn integration_lock(&self, target: &str) -> PathBuf { self.root.join("queue").join(format!("{}.lock", target.replace('/', "%2F"))) }
     pub fn notices_dir(&self) -> PathBuf { self.root.join("notices") }
     pub fn log(&self, task: &str, attempt: u32) -> PathBuf { self.root.join("logs").join(format!("{task}-{attempt}.log")) }
     pub fn prepare_lock(&self) -> PathBuf { self.root.join("workers").join("prepare.lock") }
@@ -128,6 +130,25 @@ impl Store {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
             Err(e) => Err(Error::io(path, e)),
+        }
+    }
+
+    pub fn lock_exclusive(path: &Path) -> Result<fs::File> {
+        let dir = path.parent().expect("lock paths have a parent");
+        fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
+        let file = fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).map_err(|e| Error::io(path, e))?;
+        file.lock().map_err(|e| Error::io(path, e))?;
+        Ok(file)
+    }
+
+    pub fn try_lock_exclusive(path: &Path) -> Result<Option<fs::File>> {
+        let dir = path.parent().expect("lock paths have a parent");
+        fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
+        let file = fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).map_err(|e| Error::io(path, e))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(file)),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(e)) => Err(Error::io(path, e)),
         }
     }
 

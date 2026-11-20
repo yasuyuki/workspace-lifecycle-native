@@ -404,3 +404,121 @@ fn a_task_begun_with_a_target_starts_from_it_and_integrates_into_it() {
     assert_eq!(git(&f.origin, &["rev-parse", "feature"]), commit);
     assert_eq!(f.origin_main(), main_before);
 }
+
+fn overlap_fixture(delay_secs: f64) -> (Fixture, PathBuf) {
+    let f = Fixture::new(None);
+    let log = f.dir.path().join("val_events.jsonl");
+    let script = f.dir.path().join("validator.py");
+    let body = r#"import json, os, pathlib, subprocess, sys, time
+log_path = pathlib.Path(sys.argv[1])
+delay = float(sys.argv[2])
+head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+files = sorted(p.name for p in pathlib.Path.cwd().iterdir() if p.name not in (".git", ".lifecycle.toml"))
+start = time.time()
+with log_path.open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"event": "start", "pid": os.getpid(), "head": head, "files": files, "ts": start}) + "\n")
+time.sleep(delay)
+head_end = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+files_end = sorted(p.name for p in pathlib.Path.cwd().iterdir() if p.name not in (".git", ".lifecycle.toml"))
+end = time.time()
+with log_path.open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"event": "end", "pid": os.getpid(), "head": head_end, "files": files_end, "ts": end}) + "\n")
+"#;
+    std::fs::write(&script, body).unwrap();
+    let toml = format!(
+        "[[validation]]\nargv = [\"{PYTHON}\", {}, {}, {:?}]\nwhere = \"windows\"\n",
+        serde_json::to_string(&script).unwrap(),
+        serde_json::to_string(&log).unwrap(),
+        delay_secs.to_string(),
+    );
+    let pusher = f.dir.path().join("cfg_pusher");
+    git(f.dir.path(), &["clone", "-q", f.origin.to_str().unwrap(), pusher.to_str().unwrap()]);
+    std::fs::write(pusher.join(".lifecycle.toml"), toml).unwrap();
+    git(&pusher, &["add", ".lifecycle.toml"]);
+    git(&pusher, &["commit", "-q", "-m", "add validation"]);
+    git(&pusher, &["push", "-q", "origin", "main"]);
+    git(&f.main, &["fetch", "-q", "origin"]);
+    (f, log)
+}
+
+fn read_val_events(log: &Path) -> Vec<Value> {
+    let Ok(text) = std::fs::read_to_string(log) else { return Vec::new() };
+    text.lines().filter(|l| !l.trim().is_empty()).map(|l| serde_json::from_str(l).unwrap()).collect()
+}
+
+fn wait_for_val_starts(log: &Path, count: usize) {
+    let start = Instant::now();
+    loop {
+        let starts = read_val_events(log).into_iter().filter(|e| e["event"] == "start").count();
+        if starts >= count {
+            return;
+        }
+        assert!(start.elapsed() < Duration::from_secs(30), "only {starts} starts");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn assert_disjoint_validations(log: &Path) {
+    let events = read_val_events(log);
+    let mut intervals = Vec::new();
+    for start in events.iter().filter(|e| e["event"] == "start") {
+        let pid = start["pid"].as_i64().unwrap();
+        let end = events.iter().find(|e| e["event"] == "end" && e["pid"] == pid).expect("missing end event");
+        assert_eq!(start["head"], end["head"], "HEAD mutated mid-validation: {events:?}");
+        assert_eq!(start["files"], end["files"], "files mutated mid-validation: {events:?}");
+        intervals.push((start["ts"].as_f64().unwrap(), end["ts"].as_f64().unwrap()));
+    }
+    intervals.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for pair in intervals.windows(2) {
+        assert!(pair[0].1 <= pair[1].0 + 1e-6, "overlapping validations: {intervals:?}");
+    }
+}
+
+#[test]
+fn tasks_whose_names_share_a_suffix_do_not_overlap_in_integration() {
+    let (f, log) = overlap_fixture(1.5);
+    f.begin_with_commit("x-b", "xb.txt", "xb\n");
+    f.begin_with_commit("b", "b.txt", "b\n");
+    assert_eq!(f.wl(&["finish", "x-b"])["ok"], true);
+    wait_for_val_starts(&log, 1);
+    assert_eq!(f.wl(&["finish", "b"])["ok"], true);
+    f.wait_for("x-b", "integrated");
+    f.wait_for("b", "integrated");
+    assert_disjoint_validations(&log);
+    assert_eq!(git(&f.origin, &["show", "main:xb.txt"]), "xb");
+    assert_eq!(git(&f.origin, &["show", "main:b.txt"]), "b");
+}
+
+#[test]
+fn a_restarted_worker_with_an_older_timestamp_does_not_overlap_active_validation() {
+    let (f, log) = overlap_fixture(1.5);
+    let wt_a = f.begin_with_commit("a", "file_a.txt", "file_a\n");
+    let sha_a = git(&wt_a, &["rev-parse", "HEAD"]);
+    f.begin_with_commit("b", "b.txt", "b\n");
+    assert_eq!(f.wl(&["finish", "b"])["ok"], true);
+    wait_for_val_starts(&log, 1);
+
+    let b_accept: Value = serde_json::from_slice(&std::fs::read(f.main.join(".git/wl/finishes/b/accept.json")).unwrap()).unwrap();
+    let older_ts = b_accept["accepted_at_ms"].as_u64().unwrap().saturating_sub(5000);
+    let a_dir = f.main.join(".git/wl/finishes/a");
+    std::fs::create_dir_all(&a_dir).unwrap();
+    std::fs::write(
+        a_dir.join("accept.json"),
+        serde_json::json!({
+            "version": 1, "task": "a", "attempt": 1, "commit": sha_a, "target": "main", "retire": false, "accepted_at_ms": older_ts
+        }).to_string(),
+    ).unwrap();
+    std::fs::write(
+        a_dir.join("progress.json"),
+        serde_json::json!({
+            "version": 1, "task": "a", "attempt": 1, "stage": "topic-pushed", "merged": null, "target_base": null, "detail": null, "uncommitted": false
+        }).to_string(),
+    ).unwrap();
+
+    assert_eq!(f.wl(&["status"])["ok"], true);
+    f.wait_for("a", "integrated");
+    f.wait_for("b", "integrated");
+    assert_disjoint_validations(&log);
+    assert_eq!(git(&f.origin, &["show", "main:file_a.txt"]), "file_a");
+    assert_eq!(git(&f.origin, &["show", "main:b.txt"]), "b");
+}
