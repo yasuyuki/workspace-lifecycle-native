@@ -35,13 +35,14 @@ pub fn finish(path: &Path, mut args: Args) -> Result<Value> {
     if let Some(hold) = Store::read_json::<HoldRecord>(&ws.store.hold(task.as_str()))? {
         return Err(Error::new(format!("task {task} is held: {}", hold.reason)));
     }
-    let slot = repo::open(&ws.slot_path(record.slot)?)?;
+    // Only refs are read here: checking the checkout for uncommitted changes costs about 20 ms on Windows,
+    // so the worker does it and reports it with the result.
+    let slot = repo::open_refs_only(&ws.slot_path(record.slot)?)?;
     let on_branch = slot.head()?.referent_name().is_some_and(|n| n.as_bstr() == format!("refs/heads/{}", record.branch).as_str());
     if !on_branch {
         return Err(Error::new(format!("the checkout of task {task} is not on branch {}", record.branch)));
     }
     let commit = slot.head_id()?.detach().to_string();
-    let uncommitted = repo::has_changes(&slot)?;
     crate::trace::point("slot read");
 
     let previous = Store::read_json::<Acceptance>(&ws.store.acceptance(task.as_str()))?;
@@ -54,7 +55,7 @@ pub fn finish(path: &Path, mut args: Args) -> Result<Value> {
         let stage = progress.as_ref().filter(|p| p.attempt == previous.attempt).map(|p| p.stage);
         if !stage.is_some_and(|s| s.is_terminal(previous.retire)) {
             if previous.commit == commit {
-                return Ok(json!({ "task": task, "attempt": previous.attempt, "commit": commit, "accepted": true, "uncommitted": uncommitted }));
+                return Ok(json!({ "task": task, "attempt": previous.attempt, "commit": commit, "accepted": true }));
             }
             return Err(Error::new(format!("finish attempt {} of task {task} is still running", previous.attempt)));
         }
@@ -85,7 +86,6 @@ pub fn finish(path: &Path, mut args: Args) -> Result<Value> {
         "commit": commit,
         "target": target,
         "accepted": true,
-        "uncommitted": uncommitted,
     }))
 }
 
@@ -143,6 +143,7 @@ pub(crate) fn finish_report(ws: &Workspace, task: &TaskName) -> Result<Option<Va
         "target": acceptance.target,
         "stage": progress.as_ref().map_or(Stage::Accepted, |p| p.stage),
         "merged": progress.as_ref().and_then(|p| p.merged.clone()),
+        "uncommitted": progress.as_ref().is_some_and(|p| p.uncommitted),
         "detail": progress.and_then(|p| p.detail),
     })))
 }
@@ -170,6 +171,7 @@ pub fn work(path: &Path, mut args: Args) -> Result<Value> {
             merged: None,
             target_base: None,
             detail: None,
+            uncommitted: false,
         });
     let worker = Worker { ws: &ws, acceptance: &acceptance };
     while !progress.stage.is_terminal(acceptance.retire) {
@@ -208,6 +210,8 @@ impl Worker<'_> {
     fn step(&self, progress: &mut Progress) -> Result<()> {
         match progress.stage {
             Stage::Accepted => {
+                let slot = repo::open(&self.ws.slot_path(self.record()?.slot)?)?;
+                progress.uncommitted = repo::has_changes(&slot)?;
                 self.push_topic()?;
                 progress.stage = Stage::TopicPushed;
             }
@@ -473,11 +477,14 @@ impl Worker<'_> {
     }
 
     fn notify(&self, progress: &Progress) -> Result<()> {
-        let message = match progress.stage {
+        let mut message = match progress.stage {
             Stage::Integrated => format!("{} is integrated into {}", self.acceptance.commit, self.acceptance.target),
             Stage::Retired => format!("{} is integrated into {} and the task is retired", self.acceptance.commit, self.acceptance.target),
             _ => format!("needs action: {}", progress.detail.clone().unwrap_or_default()),
         };
+        if progress.uncommitted && progress.stage == Stage::Integrated {
+            message.push_str("; the checkout had uncommitted changes when the finish started, and they are not in it");
+        }
         let notice = Notice { task: self.task().clone(), attempt: progress.attempt, stage: progress.stage, message: message.clone() };
         let name = format!("{}-{}-{:?}.json", self.task(), progress.attempt, progress.stage);
         Store::create_new_json(&self.ws.store.notices_dir().join(name), &notice)?;
