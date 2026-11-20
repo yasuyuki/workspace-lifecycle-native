@@ -22,3 +22,9 @@ gh run download --repo yasuyuki/workspace-lifecycle-native --name wl-windows-x64
 ```
 
 End the offload prefix with `-e`, not `--`. After `--`, `wsl.exe` passes the command line to the distro's shell, which parses it again and drops the quoted arguments of `sh -c`.
+
+## Verification
+
+- Statecharts: [task lifecycle](docs/lifecycle-statechart.mmd) and [finish and target integration](docs/lifecycle-finish-integration.mmd).
+- Live CLI verification skill: [skills/verify-wl/SKILL.md](skills/verify-wl/SKILL.md) (drives the built `wl` binary with disposable repos, retained evidence, and cleanup).
+- Formal verification skill: [skills/verify-finish-integration/SKILL.md](skills/verify-finish-integration/SKILL.md) (TLA+/TLC model and mutants for `wl finish` and target integration).

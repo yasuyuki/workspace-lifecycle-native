@@ -1,0 +1,50 @@
+---
+title: "wl finish と統合の遷移"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: work
+    lg1: integrating
+    lg2: attention
+    lg3: done
+  }
+  class lg0 blue
+  class lg1 purple
+  class lg2 orange
+  class lg3 teal
+  s0: 作業中
+  s1: 受付済み (Accepted)
+  s2: topic push 済みと順番待ち
+  s3: 統合先で merge と検証中
+  s4: 失敗処理中 (queue 解放)
+  s5: 要対応 (needs-action)
+  s6: 統合先で検証済み (Prepared)
+  s7: 統合先へ push 中
+  s8: 統合先へ push 済み (CI 待ち)
+  s9: 統合済み
+  s10: 退役済み
+  [*] --> s0
+  s0 --> s1: wl finish
+  s1 --> s2: 進捗 TopicPushed を記録
+  s2 --> s3: 順番を獲得し統合先へ入る
+  s3 --> s4: 検証失敗
+  s4 --> s5: 要対応 (needs-action) を記録
+  s3 --> s6: 進捗 Prepared を記録
+  s5 --> s1: wl finish
+  s6 --> s7: topic check 成功
+  s7 --> s8: 進捗 TargetPushed を記録
+  s7 --> s2: 進捗 TopicPushed を記録
+  s8 --> s9: 統合済みを記録
+  s9 --> s1: wl finish
+  s9 --> s10: 自動退役 (--retire)
+  class s0 blue
+  class s1 purple
+  class s2 purple
+  class s3 purple
+  class s4 orange
+  class s5 orange
+  class s6 purple
+  class s7 purple
+  class s8 purple
+  class s9 teal
+  class s10 teal
