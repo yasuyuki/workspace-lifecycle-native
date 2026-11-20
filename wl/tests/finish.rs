@@ -89,6 +89,17 @@ impl Fixture {
         git(&self.origin, &["rev-parse", "main"])
     }
 
+    /// Polls status until a notice about `stage` arrives; the worker writes it just after its progress.
+    fn wait_for_notice(&self, stage: &str, mut notices: Vec<Value>) -> Vec<Value> {
+        let start = Instant::now();
+        while !notices.iter().any(|n| n["stage"] == stage) {
+            assert!(start.elapsed() < Duration::from_secs(90), "no {stage} notice");
+            std::thread::sleep(Duration::from_millis(100));
+            notices.extend(self.wl(&["status"])["notices"].as_array().cloned().unwrap_or_default());
+        }
+        notices
+    }
+
     /// Polls status until the task's finish reaches `stage`, collecting every notice handed over meanwhile.
     fn wait_for(&self, task: &str, stage: &str) -> (Value, Vec<Value>) {
         let start = Instant::now();
@@ -118,6 +129,7 @@ fn finish_returns_at_once_and_the_worker_fast_forwards_the_target() {
     assert_eq!(out["ok"], true, "{out}");
     assert_eq!(out["commit"], commit.as_str());
     let (task, notices) = f.wait_for("alpha", "integrated");
+    let notices = f.wait_for_notice("integrated", notices);
     assert_eq!(task["finish"]["uncommitted"], true, "{task}");
     assert!(notices[0]["message"].as_str().unwrap().contains("untracked files"), "{notices:?}");
     assert_eq!(f.origin_main(), commit, "fast-forwarded");
@@ -134,6 +146,7 @@ fn finish_with_retire_integrates_then_frees_the_slot() {
     f.begin_with_commit("alpha", "b.txt", "b\n");
     assert_eq!(f.wl(&["finish", "alpha", "--retire"])["ok"], true);
     let (_, notices) = f.wait_for("alpha", "retired");
+    let notices = f.wait_for_notice("retired", notices);
     assert!(notices.iter().any(|n| n["stage"] == "retired"), "{notices:?}");
     assert!(!git(&f.main, &["branch", "--list", "alpha"]).contains("alpha"));
     assert!(f.wl(&["status"])["slots"]["free"].as_u64() >= Some(1));
@@ -145,13 +158,8 @@ fn a_task_name_used_again_after_retiring_integrates_its_new_commit() {
     f.begin_with_commit("alpha", "b.txt", "b\n");
     assert_eq!(f.wl(&["finish", "alpha", "--retire"])["ok"], true);
     // The retired notice comes after everything the first worker writes.
-    let start = Instant::now();
-    let (_, mut notices) = f.wait_for("alpha", "retired");
-    while !notices.iter().any(|n| n["stage"] == "retired") {
-        assert!(start.elapsed() < Duration::from_secs(90), "no retired notice");
-        std::thread::sleep(Duration::from_millis(100));
-        notices.extend(f.wl(&["status"])["notices"].as_array().cloned().unwrap_or_default());
-    }
+    let (_, notices) = f.wait_for("alpha", "retired");
+    f.wait_for_notice("retired", notices);
     let worktree = f.begin_with_commit("alpha", "c.txt", "c\n");
     let commit = git(&worktree, &["rev-parse", "HEAD"]);
     let out = f.wl(&["finish", "alpha"]);
@@ -192,6 +200,7 @@ fn a_conflict_needs_action_leaves_the_target_alone_and_a_fixed_finish_integrates
 
     f.wl(&["finish", "alpha"]);
     let (task, notices) = f.wait_for("alpha", "needs-action");
+    let notices = f.wait_for_notice("needs-action", notices);
     let detail = task["finish"]["detail"].as_str().unwrap();
     assert!(detail.contains("does not merge") && detail.contains("a.txt"), "names the conflicting file: {detail}");
     assert!(notices.iter().any(|n| n["stage"] == "needs-action"));
