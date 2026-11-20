@@ -45,6 +45,57 @@ impl Workspace {
         Store::read_json(&self.store.task(task.as_str()))?.ok_or_else(|| Error::new(format!("no task {task}")))
     }
 
+    pub(crate) fn lock_task(&self, task: &TaskName) -> Result<std::fs::File> {
+        Store::lock_exclusive(&self.store.task_lock(task.as_str()))
+    }
+
+    pub(crate) fn release_claims_for(&self, owner: &str) -> Result<()> {
+        for n in self.slot_numbers(".claim")? {
+            if Store::read_text(&self.store.claim(n))?.as_deref() == Some(owner) {
+                Store::remove(&self.store.claim(n))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reclaim_stale_prepare_claims_locked(&self) -> Result<()> {
+        self.release_claims_for(PREPARING)
+    }
+
+    pub(crate) fn reclaim_orphan_task_claims(&self) -> Result<()> {
+        for n in self.slot_numbers(".claim")? {
+            let claim_path = self.store.claim(n);
+            let Some(owner) = Store::read_text(&claim_path)? else { continue };
+            if owner == PREPARING {
+                continue;
+            }
+            let Ok(task) = TaskName::try_from(owner.clone()) else { continue };
+            let task_path = self.store.task(task.as_str());
+            if !task_path.exists() {
+                if let Some(_lock) = Store::try_lock_exclusive(&self.store.task_lock(task.as_str()))? {
+                    if !task_path.exists() && Store::read_text(&claim_path)?.as_deref() == Some(owner.as_str()) {
+                        Store::remove(&claim_path)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reclaim_orphan_claims(&self) -> Result<()> {
+        self.reclaim_orphan_task_claims()?;
+        let has_prepare = self
+            .slot_numbers(".claim")?
+            .into_iter()
+            .any(|n| matches!(Store::read_text(&self.store.claim(n)), Ok(Some(ref c)) if c == PREPARING));
+        if has_prepare {
+            if let Some(_lock) = Store::try_lock_exclusive(&self.store.prepare_lock())? {
+                self.reclaim_stale_prepare_claims_locked()?;
+            }
+        }
+        Ok(())
+    }
+
     /// Claims a slot for `owner`: one it already claimed, else a free one, else a new number.
     pub(crate) fn claim_slot(&self, owner: &str) -> Result<u32> {
         let claims = self.slot_numbers(".claim")?;
@@ -124,23 +175,15 @@ pub fn begin(path: &Path, mut args: Args) -> Result<Value> {
 
     let ws = Workspace::open(path)?;
     crate::finish::housekeeping(&ws)?;
+    let _task_lock = ws.lock_task(&task)?;
     let task_path = ws.store.task(task.as_str());
-    let mut opened_slot = None;
     let mut record = match Store::read_json::<TaskRecord>(&task_path)? {
         Some(existing) => existing,
         None => {
+            let base = repo::resolve_base(&repo::open_refs_only(&ws.layout.main_worktree)?, base_spec.as_deref())?;
             // A begin of the same task finds the claim it or an earlier attempt made, so both use one slot.
             let slot = ws.claim_slot(task.as_str())?;
             crate::trace::point("slot claimed");
-            let base = match Store::read_json::<SlotRecord>(&ws.store.slot(slot))? {
-                Some(existing) => {
-                    let slot_repo = repo::open(&existing.path)?;
-                    let base = repo::resolve_base(&slot_repo, base_spec.as_deref())?;
-                    opened_slot = Some(slot_repo);
-                    base
-                }
-                None => repo::resolve_base(&repo::open_refs_only(&ws.layout.main_worktree)?, base_spec.as_deref())?,
-            };
             let fresh = TaskRecord {
                 version: VERSION,
                 task: task.clone(),
@@ -151,10 +194,14 @@ pub fn begin(path: &Path, mut args: Args) -> Result<Value> {
                 stage: TaskStage::Claimed,
                 target: target.clone(),
             };
-            if Store::create_new_json(&task_path, &fresh)? {
-                fresh
-            } else {
-                Store::read_json(&task_path)?.ok_or_else(|| Error::new(format!("task {task} is being created by another begin")))?
+            match Store::create_new_json(&task_path, &fresh) {
+                Ok(true) => fresh,
+                Ok(false) => Store::read_json(&task_path)?
+                    .ok_or_else(|| Error::new(format!("task {task} is being created by another begin")))?,
+                Err(error) => {
+                    ws.release_claims_for(task.as_str()).ok();
+                    return Err(error);
+                }
             }
         }
     };
@@ -166,10 +213,7 @@ pub fn begin(path: &Path, mut args: Args) -> Result<Value> {
     }
     let base: gix::ObjectId = record.base.parse().map_err(|e| Error::new(format!("recorded base: {e}")))?;
     let worktree = ws.ensure_slot_checkout(record.slot, base)?;
-    let slot_repo = match opened_slot {
-        Some(slot_repo) => slot_repo,
-        None => repo::open(&worktree)?,
-    };
+    let slot_repo = repo::open(&worktree)?;
     switch_slot(slot_repo, &worktree, &record.branch, base)?;
     record.stage = TaskStage::Ready;
     Store::write_json(&task_path, &record)?;
@@ -222,8 +266,10 @@ pub fn retire(path: &Path, mut args: Args) -> Result<Value> {
 /// untracked files, commits that are neither the base nor in the remote default branch, a finish still running,
 /// and with `expected_head` a checkout that moved past the commit a finish integrated.
 pub(crate) fn retire_task(ws: &Workspace, task: &TaskName, expected_head: Option<&str>) -> Result<()> {
+    let _task_lock = ws.lock_task(task)?;
     let task_path = ws.store.task(task.as_str());
     let Some(record) = Store::read_json::<TaskRecord>(&task_path)? else {
+        ws.release_claims_for(task.as_str())?;
         return Ok(());
     };
     if Store::read_json::<HoldRecord>(&ws.store.hold(task.as_str()))?.is_some() {
@@ -352,12 +398,11 @@ pub fn release_hold(path: &Path, mut args: Args) -> Result<Value> {
 pub fn prepare_slot(path: &Path, args: Args) -> Result<Value> {
     args.finish()?;
     let ws = Workspace::open(path)?;
-    let lock_path = ws.store.prepare_lock();
-    std::fs::create_dir_all(lock_path.parent().unwrap()).map_err(|e| Error::io(&lock_path, e))?;
-    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&lock_path).map_err(|e| Error::io(&lock_path, e))?;
-    if lock.try_lock().is_err() {
+    let Some(_lock) = Store::try_lock_exclusive(&ws.store.prepare_lock())? else {
         return Ok(json!({ "skipped": "another preparation is running" }));
-    }
+    };
+    ws.reclaim_stale_prepare_claims_locked()?;
+    ws.reclaim_orphan_task_claims()?;
     let fetched = repo::git(&ws.layout.main_worktree, &["fetch", "--quiet", "origin"]).is_ok();
     let ws = Workspace::open(path)?;
     let base = repo::resolve_base(&repo::open_refs_only(&ws.layout.main_worktree)?, None)?;
@@ -370,12 +415,16 @@ pub fn prepare_slot(path: &Path, args: Args) -> Result<Value> {
     if let Some(&n) = ws.free_slots()?.first() {
         let worktree = ws.slot_path(n)?;
         if Store::create_new(&ws.store.claim(n), PREPARING.as_bytes())? {
-            let moved = !repo::has_changes(&repo::open(&worktree)?)?
-                && repo::git(&worktree, &["checkout", "--quiet", "--detach", &base.to_string()]).is_ok();
-            if moved {
-                settle_index(&worktree);
-            }
+            let outcome: Result<bool> = (|| {
+                let moved = !repo::has_changes(&repo::open(&worktree)?)?
+                    && repo::git(&worktree, &["checkout", "--quiet", "--detach", &base.to_string()]).is_ok();
+                if moved {
+                    settle_index(&worktree);
+                }
+                Ok(moved)
+            })();
             Store::remove(&ws.store.claim(n))?;
+            let moved = outcome?;
             return Ok(json!({ "slot": n, "advanced": moved, "fetched": fetched }));
         }
     }

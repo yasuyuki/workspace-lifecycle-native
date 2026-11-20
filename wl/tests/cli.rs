@@ -243,3 +243,163 @@ fn an_exepath_that_is_not_the_git_root_is_replaced_from_the_cache() {
     let second = run();
     assert!(second.contains("git root from cache"), "{second}");
 }
+
+fn fixture_with_files(count: usize) -> Fixture {
+    let dir = tempfile::tempdir().unwrap();
+    let origin = dir.path().join("origin.git");
+    let seed = dir.path().join("seed");
+    std::fs::create_dir_all(&seed).unwrap();
+    git(&seed, &["init", "-q", "-b", "main"]);
+    for i in 0..count {
+        std::fs::write(seed.join(format!("f{i}.txt")), format!("{i}\n")).unwrap();
+    }
+    git(&seed, &["add", "-A"]);
+    git(&seed, &["commit", "-q", "-m", "seed"]);
+    git(dir.path(), &["clone", "-q", "--bare", seed.to_str().unwrap(), origin.to_str().unwrap()]);
+    let main = dir.path().join("product");
+    git(dir.path(), &["clone", "-q", origin.to_str().unwrap(), main.to_str().unwrap()]);
+    Fixture { _dir: dir, main, origin }
+}
+
+fn wait_until_quiet(repo: &Path) -> Value {
+    let start = Instant::now();
+    loop {
+        let status = wl(repo, &["status"]);
+        if status["background"] == false {
+            return status;
+        }
+        assert!(start.elapsed() < Duration::from_secs(60), "background work did not finish: {status}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn claim_files(repo: &Path) -> Vec<(String, String)> {
+    let dir = repo.join(".git/wl/slots");
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut out = Vec::new();
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|s| s.to_str()) == Some("claim") {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&path).unwrap();
+            out.push((name, text));
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn begin_with_invalid_base_does_not_leak_a_slot_claim() {
+    let f = fixture();
+    let first = wl(&f.main, &["begin", "alpha", "--request", "r1"]);
+    wait_until_quiet(&f.main);
+    assert_eq!(wl(&f.main, &["retire", "alpha"])["ok"], true);
+    wait_until_quiet(&f.main);
+
+    let failed = wl(&f.main, &["begin", "beta", "--request", "r2", "--base", "refs/heads/no-such-ref"]);
+    assert_eq!(failed["ok"], false, "{failed}");
+    assert_eq!(claim_files(&f.main), Vec::<(String, String)>::new());
+    let status = wait_until_quiet(&f.main);
+    assert!(status["slots"]["free"].as_u64().unwrap() >= 1, "{status}");
+
+    let gamma = wl(&f.main, &["begin", "gamma", "--request", "r3"]);
+    assert_eq!(gamma["ok"], true, "{gamma}");
+    assert_eq!(gamma["worktree"], first["worktree"]);
+}
+
+#[test]
+fn stale_prepare_and_orphan_task_claims_are_reclaimed_by_housekeeping() {
+    let f = fixture();
+    let first = wl(&f.main, &["begin", "alpha", "--request", "r1"]);
+    wait_until_quiet(&f.main);
+    assert_eq!(wl(&f.main, &["retire", "alpha"])["ok"], true);
+    wait_until_quiet(&f.main);
+
+    std::fs::write(f.main.join(".git/wl/slots/1.claim"), "#prepare").unwrap();
+    let status = wait_until_quiet(&f.main);
+    assert!(status["slots"]["free"].as_u64().unwrap() >= 1, "{status}");
+    assert!(claim_files(&f.main).is_empty(), "{:?}", claim_files(&f.main));
+
+    assert_eq!(wl(&f.main, &["begin", "alpha", "--request", "r2"])["ok"], true);
+    wait_until_quiet(&f.main);
+    std::fs::remove_file(f.main.join(".git/wl/tasks/alpha.json")).unwrap();
+
+    let status = wait_until_quiet(&f.main);
+    assert!(status["tasks"].as_array().unwrap().is_empty(), "{status}");
+    assert!(claim_files(&f.main).is_empty(), "{:?}", claim_files(&f.main));
+    let beta = wl(&f.main, &["begin", "beta", "--request", "r3"]);
+    assert_eq!(beta["worktree"], first["worktree"]);
+}
+
+#[test]
+fn concurrent_begins_of_the_same_task_claim_only_one_slot() {
+    let f = fixture();
+    assert_eq!(wl(&f.main, &["begin", "seed1", "--request", "r"])["ok"], true);
+    wait_until_quiet(&f.main);
+    assert_eq!(wl(&f.main, &["begin", "seed2", "--request", "r"])["ok"], true);
+    wait_until_quiet(&f.main);
+    assert_eq!(wl(&f.main, &["retire", "seed1"])["ok"], true);
+    assert_eq!(wl(&f.main, &["retire", "seed2"])["ok"], true);
+    wait_until_quiet(&f.main);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let results: Vec<Value> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let main = &f.main;
+                let barrier = barrier.clone();
+                s.spawn(move || {
+                    barrier.wait();
+                    wl(main, &["begin", "alpha", "--request", "r"])
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(results[0]["ok"], true, "{results:?}");
+    assert_eq!(results[1]["ok"], true, "{results:?}");
+    assert_eq!(results[0]["worktree"], results[1]["worktree"]);
+    wait_until_quiet(&f.main);
+    assert_eq!(claim_files(&f.main).len(), 1, "{:?}", claim_files(&f.main));
+    assert_eq!(wl(&f.main, &["retire", "alpha"])["ok"], true);
+    wait_until_quiet(&f.main);
+    assert!(claim_files(&f.main).is_empty(), "{:?}", claim_files(&f.main));
+}
+
+#[test]
+fn retire_during_begin_does_not_leave_two_tasks_sharing_a_slot() {
+    let f = fixture_with_files(200);
+    let task_path = f.main.join(".git/wl/tasks/alpha.json");
+    let main = f.main.clone();
+    let handle = std::thread::spawn(move || wl(&main, &["begin", "alpha", "--request", "r1"]));
+    let start = Instant::now();
+    let mut retired_res = None;
+    while start.elapsed() < Duration::from_secs(10) {
+        if task_path.exists() {
+            retired_res = Some(wl(&f.main, &["retire", "alpha"]));
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let begin_alpha = handle.join().unwrap();
+    assert_eq!(begin_alpha["ok"], true, "{begin_alpha}");
+    let retired = retired_res.unwrap_or_else(|| wl(&f.main, &["retire", "alpha"]));
+    assert_eq!(retired["ok"], true, "{retired}");
+    let beta = wl(&f.main, &["begin", "beta", "--request", "r2"]);
+    assert_eq!(beta["ok"], true, "{beta}");
+
+    let status = wait_until_quiet(&f.main);
+    let tasks = status["tasks"].as_array().unwrap();
+    let worktrees: Vec<&str> = tasks.iter().map(|t| t["worktree"].as_str().unwrap()).collect();
+    let unique: std::collections::HashSet<&str> = worktrees.iter().copied().collect();
+    assert_eq!(worktrees.len(), unique.len(), "two tasks share one slot: {status}");
+    let expected_claims: Vec<(String, String)> = tasks
+        .iter()
+        .map(|t| {
+            let slot = Path::new(t["worktree"].as_str().unwrap()).file_name().unwrap().to_string_lossy();
+            (format!("{slot}.claim"), t["task"].as_str().unwrap().to_owned())
+        })
+        .collect();
+    assert_eq!(claim_files(&f.main), expected_claims);
+}

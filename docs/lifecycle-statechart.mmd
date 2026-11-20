@@ -1,0 +1,56 @@
+---
+title: "workspace-lifecycle-native (wl) タスクのライフサイクル"
+---
+stateDiagram-v2
+  direction LR
+  state "Legend" as legend {
+    lg0: work
+    lg1: attention
+    lg2: done
+  }
+  class lg0 blue
+  class lg1 orange
+  class lg2 teal
+  state "At the same time" as all {
+    state "Task" as r0 {
+      s0: 未開始
+      s1: 作業中
+      s2: 退役済み
+      s3: finish 受付済み
+      s4: 要対応 (needs-action)
+      s5: topic push 済み
+      s6: 統合先で検証済み
+      s7: 統合先へ push 済み
+      s8: 統合済み
+      [*] --> s0
+      s0 --> s1: wl begin
+      s1 --> s2: wl retire [when 保留なし]
+      s1 --> s3: wl finish [--retire]
+      s3 --> s4: push 判定が拒否または保留
+      s3 --> s5: push 判定後に topic を push
+      s4 --> s2: wl retire [when 保留なし]
+      s4 --> s3: wl finish [--retire]
+      s5 --> s4: merge 衝突または検証失敗
+      s5 --> s6: 順番待ち後に統合先で merge と検証
+      s6 --> s4: topic check 失敗または保留や判定不一致
+      s6 --> s5: 統合先が進み再準備 [when 保留なし]
+      s6 --> s7: topic check 成功後に統合先へ push [when 保留なし]
+      s7 --> s4: 統合先の required check 失敗
+      s7 --> s8: 統合先の required check 成功
+      s8 --> s2: wl retire or 自動退役 (--retire) [when 保留なし]
+      s8 --> s3: wl finish [--retire]
+      s8 --> s4: 保留や未commitまたは後続commitで退役拒否
+    }
+    --
+    state "Hold" as r1 {
+      s9: 保留なし
+      s10: 保留中
+      [*] --> s9
+      s9 --> s10: wl hold [unless 未開始 or 退役済み]
+      s10 --> s9: wl release-hold
+    }
+  }
+  class s0 blue
+  class s2 teal
+  class s4 orange
+  class s10 orange
