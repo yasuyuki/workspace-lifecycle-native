@@ -1,0 +1,38 @@
+---
+title: "wl slot と claim の状態遷移"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: done
+    lg1: busy
+    lg2: work
+  }
+  class lg0 teal
+  class lg1 purple
+  class lg2 blue
+  s0: 空き (準備済)
+  s1: 準備中 (prepare claim)
+  s2: claim 済 (Task 未記録)
+  s3: 開始済 (Claimed)
+  s4: checkout 準備済
+  s5: 作業可能 (Ready)
+  s6: 退役処理中 (branch 削除済)
+  s7: 退役処理中 (Task 削除済)
+  [*] --> s0
+  s0 --> s1: prepare_slot が prepare claim 書込
+  s0 --> s2: claim 作成
+  s1 --> s0: prepare_slot 完了 (claim 解放)
+  s2 --> s3: Task(Claimed) 書込
+  s3 --> s4: slot checkout 確認
+  s4 --> s5: branch 切替と Ready 書込
+  s5 --> s6: retire 安全性検査と clean
+  s6 --> s7: tasks/t.json 削除
+  s7 --> s0: slots/n.claim 削除
+  class s0 teal
+  class s1 purple
+  class s2 purple
+  class s3 purple
+  class s4 purple
+  class s5 blue
+  class s6 blue
+  class s7 purple

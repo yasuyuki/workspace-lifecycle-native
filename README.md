@@ -25,6 +25,6 @@ End the offload prefix with `-e`, not `--`. After `--`, `wsl.exe` passes the com
 
 ## Verification
 
-- Statecharts: [task lifecycle](docs/lifecycle-statechart.mmd) and [finish and target integration](docs/lifecycle-finish-integration.mmd).
+- Statecharts: [task lifecycle](docs/lifecycle-statechart.mmd), [finish and target integration](docs/lifecycle-finish-integration.mmd), and [slot and claim lifecycle](docs/lifecycle-slot-claims.mmd).
 - Live CLI verification skill: [skills/verify-wl/SKILL.md](skills/verify-wl/SKILL.md) (drives the built `wl` binary with disposable repos, retained evidence, and cleanup).
-- Formal verification skill: [skills/verify-finish-integration/SKILL.md](skills/verify-finish-integration/SKILL.md) (TLA+/TLC model and mutants for `wl finish` and target integration).
+- Formal verification skills: [skills/verify-finish-integration/SKILL.md](skills/verify-finish-integration/SKILL.md) (`wl finish` and target integration) and [skills/verify-slot-claims/SKILL.md](skills/verify-slot-claims/SKILL.md) (`wl begin`, `wl retire`, and `__prepare-slot` slot claims).
