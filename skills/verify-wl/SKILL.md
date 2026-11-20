@@ -1,10 +1,14 @@
 ---
 name: verify-wl
-description: Verify that a workspace-lifecycle-native checkout builds `wl`, runs the task lifecycle (`begin`, `hold`, `finish --retire`, `status`, `retire`) through the built `wl` binary with validation and slot-cache retention, retains evidence, and cleans up scratch state. Use when verifying `wl` behavior or checking changes to `wl/src/`.
+description: Verify wl task lifecycle, slot-cache retention, or required-check gates through the real wl CLI using disposable repositories and retained evidence.
 license: MIT
 ---
 
 # Verify workspace-lifecycle-native (wl)
+
+For topic and target required-check gates, failure, or retry, use the
+[required-checks recipe](features/required-checks.md). It takes a built binary
+and substitutes a loopback API for GitHub.
 
 Build `wl` from the selected `workspace-lifecycle-native` checkout into an isolated
 scratch directory and drive the compiled `wl` executable as a user/agent does:
