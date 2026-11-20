@@ -143,7 +143,7 @@ pub(crate) fn finish_report(ws: &Workspace, task: &TaskName) -> Result<Option<Va
         "target": acceptance.target,
         "stage": progress.as_ref().map_or(Stage::Accepted, |p| p.stage),
         "merged": progress.as_ref().and_then(|p| p.merged.clone()),
-        "uncommitted": progress.as_ref().is_some_and(|p| p.uncommitted),
+        "uncommitted": progress.as_ref().and_then(|p| p.uncommitted),
         "detail": progress.and_then(|p| p.detail),
     })))
 }
@@ -171,7 +171,7 @@ pub fn work(path: &Path, mut args: Args) -> Result<Value> {
             merged: None,
             target_base: None,
             detail: None,
-            uncommitted: false,
+            uncommitted: None,
         });
     let worker = Worker { ws: &ws, acceptance: &acceptance };
     while !progress.stage.is_terminal(acceptance.retire) {
@@ -210,8 +210,10 @@ impl Worker<'_> {
     fn step(&self, progress: &mut Progress) -> Result<()> {
         match progress.stage {
             Stage::Accepted => {
-                let slot = repo::open(&self.ws.slot_path(self.record()?.slot)?)?;
-                progress.uncommitted = repo::has_changes(&slot)?;
+                // Untracked files count too: a new file left out of the commit is the change most easily missed.
+                // No optional locks: the person may be working in the checkout meanwhile.
+                let worktree = self.ws.slot_path(self.record()?.slot)?;
+                progress.uncommitted = Some(!repo::git(&worktree, &["--no-optional-locks", "status", "--porcelain", "--untracked-files=all"])?.is_empty());
                 self.push_topic()?;
                 progress.stage = Stage::TopicPushed;
             }
@@ -482,8 +484,8 @@ impl Worker<'_> {
             Stage::Retired => format!("{} is integrated into {} and the task is retired", self.acceptance.commit, self.acceptance.target),
             _ => format!("needs action: {}", progress.detail.clone().unwrap_or_default()),
         };
-        if progress.uncommitted && progress.stage == Stage::Integrated {
-            message.push_str("; the checkout had uncommitted changes when the finish started, and they are not in it");
+        if progress.uncommitted == Some(true) && progress.stage == Stage::Integrated {
+            message.push_str("; the checkout had uncommitted changes or untracked files when the finish started, and they are not in it");
         }
         let notice = Notice { task: self.task().clone(), attempt: progress.attempt, stage: progress.stage, message: message.clone() };
         let name = format!("{}-{}-{:?}.json", self.task(), progress.attempt, progress.stage);

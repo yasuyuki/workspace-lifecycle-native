@@ -113,13 +113,13 @@ fn finish_returns_at_once_and_the_worker_fast_forwards_the_target() {
     let f = Fixture::new(None);
     let worktree = f.begin_with_commit("alpha", "b.txt", "b\n");
     let commit = git(&worktree, &["rev-parse", "HEAD"]);
-    std::fs::write(worktree.join("a.txt"), "not committed\n").unwrap();
+    std::fs::write(worktree.join("new.txt"), "not added\n").unwrap();
     let out = f.wl(&["finish", "alpha"]);
     assert_eq!(out["ok"], true, "{out}");
     assert_eq!(out["commit"], commit.as_str());
     let (task, notices) = f.wait_for("alpha", "integrated");
     assert_eq!(task["finish"]["uncommitted"], true, "{task}");
-    assert!(notices[0]["message"].as_str().unwrap().contains("uncommitted changes"), "{notices:?}");
+    assert!(notices[0]["message"].as_str().unwrap().contains("untracked files"), "{notices:?}");
     assert_eq!(f.origin_main(), commit, "fast-forwarded");
     assert_eq!(git(&f.origin, &["rev-parse", "alpha"]), commit, "the topic was pushed");
     assert_eq!(task["finish"]["merged"], commit.as_str());

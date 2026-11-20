@@ -115,9 +115,10 @@ pub struct Progress {
     /// The target commit the preparation started from.
     pub target_base: Option<String>,
     pub detail: Option<String>,
-    /// The checkout had uncommitted changes when the worker started; they are not part of the accepted commit.
+    /// Whether the checkout had uncommitted changes or untracked files when the worker started; they are not part of
+    /// the accepted commit. Unknown until the worker has looked.
     #[serde(default)]
-    pub uncommitted: bool,
+    pub uncommitted: Option<bool>,
 }
 
 /// Created by the worker; the next command that reports it deletes it.
