@@ -75,7 +75,8 @@ pub struct MachineConfig {
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Offload {
-    /// Runs the argv that follows it in the offload host, such as `["wsl.exe", "-d", "ubuntu-26-development", "-u", "wl", "--"]`.
+    /// Runs the argv that follows it in the offload host, such as `["wsl.exe", "-d", "Ubuntu-26.04", "-u", "wl-offload", "-e"]`.
+    /// `-e` runs the argv as given; after `--`, the distro's shell parses the command line again.
     pub prefix: Vec<String>,
     /// A directory on the offload host's own file system, never under `/mnt/c`.
     pub root: String,

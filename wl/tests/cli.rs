@@ -224,3 +224,22 @@ fn retire_keeps_the_declared_slot_cache_and_removes_other_ignored_files() {
     assert!(worktree.join("target/out").exists(), "the slot cache stays");
     assert!(!worktree.join("scratch").exists(), "other ignored files go");
 }
+
+/// Git Bash sets `EXEPATH` to its `bin` directory. `wl` must not take that for the Git root, or gix launches git to find it.
+#[cfg(windows)]
+#[test]
+fn an_exepath_that_is_not_the_git_root_is_replaced_from_the_cache() {
+    let f = fixture();
+    let local = f.main.parent().unwrap().join("local");
+    let run = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_wl")).arg("--repo").arg(&f.main).arg("status")
+            .env("EXEPATH", f.main.parent().unwrap()).env("LOCALAPPDATA", &local).env("WL_TRACE", "1")
+            .output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stderr).unwrap()
+    };
+    let first = run();
+    assert!(first.contains("git root not cached"), "{first}");
+    let second = run();
+    assert!(second.contains("git root from cache"), "{second}");
+}

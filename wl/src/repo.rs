@@ -1,25 +1,28 @@
 use crate::error::{Error, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::ffi::OsString;
+use std::sync::OnceLock;
 
-static SET_EXEPATH: AtomicBool = AtomicBool::new(false);
+/// The caller's `EXEPATH`, kept when `wl` replaced it, so that the processes `wl` starts see the caller's environment.
+static CALLER_EXEPATH: OnceLock<Option<OsString>> = OnceLock::new();
 
 /// gix finds Git for Windows' system configuration and attributes by launching git once per process,
-/// unless `EXEPATH` names the Git root as it does inside Git Bash. Sets it from a per-user cache.
-/// Must run before any thread starts.
+/// unless `EXEPATH` names the Git root. Git Bash sets `EXEPATH` to its `bin` directory, which is not the root,
+/// so a value that does not look like the root is replaced from a per-user cache. Must run before any thread starts.
 pub fn prepare_environment() {
     #[cfg(windows)]
     {
-        if std::env::var_os("EXEPATH").is_some() {
+        let usable = |root: &Path| ["clangarm64", "ucrt64", "mingw64", "mingw32"].iter().filter(|c| root.join(c).is_dir()).count() == 1;
+        let caller = std::env::var_os("EXEPATH");
+        if caller.as_ref().is_some_and(|v| usable(Path::new(v))) {
             return;
         }
         let Some(cache) = std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("wl").join("git-root")) else { return };
-        let usable = |root: &Path| ["clangarm64", "ucrt64", "mingw64", "mingw32"].iter().filter(|c| root.join(c).is_dir()).count() == 1;
         let cached = std::fs::read_to_string(&cache).ok().map(|s| PathBuf::from(s.trim())).filter(|r| usable(r));
         crate::trace::point(if cached.is_some() { "git root from cache" } else { "git root not cached" });
         let root = cached.or_else(|| {
-            let exec_path = Command::new("git").arg("--exec-path").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+            let exec_path = command("git").arg("--exec-path").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
             let exec_path = PathBuf::from(String::from_utf8(exec_path.stdout).ok()?.trim());
             let root = exec_path.ancestors().find(|p| p.file_name().is_some_and(|n| n == "libexec"))?.parent()?.parent()?.to_path_buf();
             if !usable(&root) {
@@ -31,8 +34,8 @@ pub fn prepare_environment() {
         });
         if let Some(root) = root {
             // SAFETY: called at the start of main, before any other thread exists.
+            let _ = CALLER_EXEPATH.set(caller);
             unsafe { std::env::set_var("EXEPATH", root) };
-            SET_EXEPATH.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -118,13 +121,25 @@ pub fn resolve_base(repo: &gix::Repository, spec: Option<&str>) -> Result<gix::O
     }
 }
 
+/// Starts a program other than `wl` with the caller's environment.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    match CALLER_EXEPATH.get() {
+        Some(Some(value)) => {
+            command.env("EXEPATH", value);
+        }
+        Some(None) => {
+            command.env_remove("EXEPATH");
+        }
+        None => {}
+    }
+    command
+}
+
 pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let mut command = Command::new("git");
+    let mut command = command("git");
     // Automatic gc and maintenance would hold ref locks that a foreground command then waits for.
     command.args(["-c", "gc.auto=0", "-c", "maintenance.auto=false", "-C"]).arg(dir).args(args).stdin(Stdio::null());
-    if SET_EXEPATH.load(Ordering::Relaxed) {
-        command.env_remove("EXEPATH");
-    }
     crate::trace::point(&format!("git {} start", args.first().unwrap_or(&"")));
     let output = command
         .output()

@@ -138,6 +138,27 @@ fn finish_with_retire_integrates_then_frees_the_slot() {
 }
 
 #[test]
+fn a_task_name_used_again_after_retiring_integrates_its_new_commit() {
+    let f = Fixture::new(None);
+    f.begin_with_commit("alpha", "b.txt", "b\n");
+    assert_eq!(f.wl(&["finish", "alpha", "--retire"])["ok"], true);
+    // The retired notice comes after everything the first worker writes.
+    let start = Instant::now();
+    let (_, mut notices) = f.wait_for("alpha", "retired");
+    while !notices.iter().any(|n| n["stage"] == "retired") {
+        assert!(start.elapsed() < Duration::from_secs(90), "no retired notice");
+        std::thread::sleep(Duration::from_millis(100));
+        notices.extend(f.wl(&["status"])["notices"].as_array().cloned().unwrap_or_default());
+    }
+    let worktree = f.begin_with_commit("alpha", "c.txt", "c\n");
+    let commit = git(&worktree, &["rev-parse", "HEAD"]);
+    let out = f.wl(&["finish", "alpha"]);
+    assert_eq!(out["attempt"], 1, "{out}");
+    f.wait_for("alpha", "integrated");
+    assert_eq!(f.origin_main(), commit);
+}
+
+#[test]
 fn a_moved_target_gets_a_merge_commit_with_both_parents() {
     let f = Fixture::new(None);
     let worktree = f.begin_with_commit("alpha", "b.txt", "b\n");

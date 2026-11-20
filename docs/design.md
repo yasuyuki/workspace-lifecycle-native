@@ -14,10 +14,10 @@ Windows で開発 session を動かす人と agent が、task の開始から統
 |---|---|---|
 | `wl.exe` | Windows | 全 command。Rust の単一実行 file（ADR 0002） |
 | worker | Windows | `wl.exe` が finish acceptance ごとに起動する、切り離された process（ADR 0006） |
-| offload 実行先 | WSL の `ubuntu-26-development` | offload 専用の user と directory。`any` の validation 手順を走らせる（ADR 0014） |
+| offload 実行先 | WSL の `Ubuntu-26.04` | offload 専用の user と directory。`any` の validation 手順を走らせる（ADR 0014） |
 | push 判定 | 既存の `workspace_lifecycle.push` | worker が push の前に呼ぶ（ADR 0012） |
 
-Git の読取りは gix でプロセス内から行う。設定は system、application、user の file を includes つきで読み、環境変数からの設定は読まない。Windows では gix が system の設定と attributes の場所を知るために git を起動するので、`wl` は Git の root を user ごとに `%LOCALAPPDATA%\wl\git-root` へ cache し、`EXEPATH` に入れてから開く（Git Bash と同じ）。git CLI は push、merge、fetch、slot の作成と差分の切替だけに使う。
+Git の読取りは gix でプロセス内から行う。設定は system、application、user の file を includes つきで読み、環境変数からの設定は読まない。Windows では gix が system の設定と attributes の場所を知るために git を起動するので、`wl` は Git の root を user ごとに `%LOCALAPPDATA%\wl\git-root` へ cache し、`EXEPATH` に入れてから開く。Git Bash は `EXEPATH` に Git の `bin` の path を入れるが、これは root ではないので、cache の root で置き換える。`wl` が起動する他の program には、呼び手の `EXEPATH` を渡す。git CLI は push、merge、fetch、slot の作成と差分の切替だけに使う。
 
 切り離した process は、Windows では標準 handle を継承させず、優先度を通常より低くして起動する。継承させると、呼び手が `wl` の出力の終わりを待つ間、background work の終了まで待たされる。
 
@@ -83,11 +83,11 @@ stateDiagram-v2
 
 ## WSL offload
 
-user ごとの設定 file の `offload` に、WSL で command を実行する前置き（例 `["wsl.exe", "-d", "ubuntu-26-development", "-u", "wl", "--"]`）と、WSL 内の root を書く。設定が無ければ、`any` の手順も Windows で走る。
+user ごとの設定 file の `offload` に、WSL で command を実行する前置き（例 `["wsl.exe", "-d", "Ubuntu-26.04", "-u", "wl-offload", "-e"]`）と、WSL 内の root を書く。前置きの最後は `-e` にする。`--` では、wsl.exe が command line を distro の shell にもう一度解釈させ、`sh -c` に渡す引数が失われる。設定が無ければ、`any` の手順も Windows で走る。
 
 1. worker は、merge 済みの commit を `git archive` で書き出し、前置きを通して WSL 内の `<root>/<repository>-<統合先>` へ展開する。展開の前に、前の内容は消す。
 2. 展開は `tar -m` で行い、file の時刻を展開した時刻にする。archive の時刻は commit の時刻で、前回の build より古いので、cargo は変わった source を新しくないと判断してしまう。
-3. directory の path は repository と統合先ごとに固定なので、WSL 側の cargo の build-dir（path ごとに分かれる）は前回の build を再利用する。
+3. 展開先は毎回消すので、`target/` に build を残せない。offload user の cargo 設定で build-dir を展開先の外（例 `~/.cache/cargo-build/{workspace-path-hash}`）に置く。展開先の path は repository と統合先ごとに固定なので、前回の build を再利用する。
 4. 宣言された command をその directory で実行し、出力は Windows 側の log に残す。
 
 `/mnt/c` を経由する読み書きはしない。offload する手順は commit の内容だけを入力にする。

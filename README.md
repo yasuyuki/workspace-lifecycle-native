@@ -17,6 +17,8 @@ gh run download --repo yasuyuki/workspace-lifecycle-native --name wl-windows-x64
 ```json
 {
   "preflight": ["<python>", "-m", "workspace_lifecycle.push", "{repo}", "--policy", "<private policy path>"],
-  "offload": { "prefix": ["wsl.exe", "-d", "ubuntu-26-development", "-u", "<offload user>", "--"], "root": "/home/<offload user>/wl-offload" }
+  "offload": { "prefix": ["wsl.exe", "-d", "<distro>", "-u", "<offload user>", "-e"], "root": "/home/<offload user>/wl-offload" }
 }
 ```
+
+End the offload prefix with `-e`, not `--`. After `--`, `wsl.exe` passes the command line to the distro's shell, which parses it again and drops the quoted arguments of `sh -c`.

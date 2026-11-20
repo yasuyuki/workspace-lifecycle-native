@@ -9,7 +9,7 @@ use crate::Args;
 use serde_json::{Value, json};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CHECK_POLL: Duration = Duration::from_secs(15);
@@ -45,6 +45,10 @@ pub fn finish(path: &Path, mut args: Args) -> Result<Value> {
     crate::trace::point("slot read");
 
     let previous = Store::read_json::<Acceptance>(&ws.store.acceptance(task.as_str()))?;
+    if previous.is_none() {
+        // Progress left without an acceptance belongs to an earlier task of the same name.
+        Store::remove(&ws.store.progress(task.as_str()))?;
+    }
     let progress = Store::read_json::<Progress>(&ws.store.progress(task.as_str()))?;
     if let Some(previous) = &previous {
         let stage = progress.as_ref().filter(|p| p.attempt == previous.attempt).map(|p| p.stage);
@@ -175,7 +179,11 @@ pub fn work(path: &Path, mut args: Args) -> Result<Value> {
             progress.detail = Some(error.to_string());
             worker.withdraw();
         }
-        Store::write_durable(&progress_path, &progress)?;
+        // Retiring removed the task's finish records; writing progress back would make a later task of the same name
+        // read its first attempt as already retired.
+        if progress.stage != Stage::Retired {
+            Store::write_durable(&progress_path, &progress)?;
+        }
         if progress.stage != before && matches!(progress.stage, Stage::Integrated | Stage::Retired | Stage::NeedsAction) {
             worker.notify(&progress)?;
         }
@@ -236,7 +244,7 @@ impl Worker<'_> {
             return Err(Error::new(format!("no push preflight is configured in {at}")));
         }
         let argv: Vec<String> = machine.preflight.iter().map(|a| if a == "{repo}" { checkout.display().to_string() } else { a.clone() }).collect();
-        let output = Command::new(&argv[0]).args(&argv[1..]).stdin(Stdio::null()).output().map_err(|e| Error::new(format!("cannot start the push preflight: {e}")))?;
+        let output = crate::repo::command(&argv[0]).args(&argv[1..]).stdin(Stdio::null()).output().map_err(|e| Error::new(format!("cannot start the push preflight: {e}")))?;
         let decision: Value = serde_json::from_slice(&output.stdout)
             .map_err(|_| Error::new(format!("the push preflight did not print JSON: {}", String::from_utf8_lossy(&output.stderr).trim())))?;
         if decision["decision"] != "push" {
@@ -360,7 +368,7 @@ impl Worker<'_> {
     fn export(&self, offload: &config::Offload, commit: &str) -> Result<String> {
         let name = self.ws.layout.main_worktree.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let dir = format!("{}/{}-{}", offload.root.trim_end_matches('/'), name, self.acceptance.target.replace('/', "-"));
-        let mut archive = Command::new("git")
+        let mut archive = crate::repo::command("git")
             .args(["-c", "gc.auto=0", "-C"])
             .arg(&self.ws.layout.main_worktree)
             .args(["archive", "--format=tar", commit])
@@ -369,7 +377,7 @@ impl Worker<'_> {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| Error::new(format!("cannot start git archive: {e}")))?;
-        let mut unpack = Command::new(&offload.prefix[0]);
+        let mut unpack = crate::repo::command(&offload.prefix[0]);
         unpack
             .args(&offload.prefix[1..])
             .args(["sh", "-c", "rm -rf \"$1\" && mkdir -p \"$1\" && tar -x -m -C \"$1\"", "sh", &dir])
@@ -483,7 +491,7 @@ impl Worker<'_> {
 /// Runs `argv` in `dir`, appending its output to `log`; the error carries the exit status and the output's last lines.
 fn run_logged(dir: &Path, argv: &[String], log: &Path) -> Result<()> {
     std::fs::create_dir_all(log.parent().unwrap()).map_err(|e| Error::io(log, e))?;
-    let mut command = Command::new(argv.first().ok_or_else(|| Error::new("empty validation argv"))?);
+    let mut command = crate::repo::command(argv.first().ok_or_else(|| Error::new("empty validation argv"))?);
     command.args(&argv[1..]).current_dir(dir).stdin(Stdio::null());
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().to_ascii_uppercase().starts_with("WL_") {
@@ -518,7 +526,7 @@ fn github_slug(url: &str) -> Option<String> {
 
 /// The state of each required check on `sha`: the latest run with the same app and name, as the legacy lifecycle reads it.
 fn check_states<'a>(slug: &str, sha: &str, checks: &'a [RequiredCheck]) -> Result<Vec<(&'a RequiredCheck, CheckState)>> {
-    let output = Command::new("gh")
+    let output = crate::repo::command("gh")
         .args(["api", &format!("repos/{slug}/commits/{sha}/check-runs?per_page=100")])
         .stdin(Stdio::null())
         .output()
@@ -559,7 +567,7 @@ fn toast(title: &str, message: &str) {
             escape(title),
             escape(&message.chars().take(200).collect::<String>())
         );
-        let _ = Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        let _ = crate::repo::command("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
     }
     #[cfg(not(windows))]
     {
