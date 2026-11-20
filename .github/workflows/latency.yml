@@ -1,0 +1,9 @@
+name: latency
+on:
+  workflow_dispatch:
+jobs:
+  latency:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --locked --release -p wl --test latency -- --ignored --nocapture

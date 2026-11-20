@@ -24,10 +24,3 @@ jobs:
         with:
           name: wl-windows-x64
           path: target/release/wl.exe
-  # Not a required check: runner VMs vary too much for a pass or fail at 50 ms (Issue #1, P2 and P3 records).
-  # The Windows controller measurement is the acceptance.
-  latency:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: cargo test --locked --release -p wl --test latency -- --ignored --nocapture
