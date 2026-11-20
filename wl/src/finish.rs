@@ -316,35 +316,50 @@ impl Worker<'_> {
         let main = &self.ws.layout.main_worktree;
         repo::git(main, &["fetch", "--quiet", "origin", &format!("+refs/heads/{target}:refs/remotes/origin/{target}")])?;
         if !path.join(".git").exists() {
-            repo::git(main, &["worktree", "add", "--quiet", "-B", &branch, &path.display().to_string(), &format!("refs/remotes/origin/{target}")])?;
+            // The branch keeps this upstream when later checkouts reset it; the push preflight reads the target from it.
+            repo::git(main, &["worktree", "add", "--quiet", "--track", "-B", &branch, &path.display().to_string(), &format!("refs/remotes/origin/{target}")])?;
+        } else if repo::open_refs_only(&path)?.git_dir().join("MERGE_HEAD").exists() {
+            repo::git(&path, &["merge", "--abort"]).ok();
         }
-        repo::git(&path, &["merge", "--abort"]).ok();
-        repo::git(&path, &["checkout", "--quiet", "--force", "-B", &branch, &format!("refs/remotes/origin/{target}")])?;
-        repo::git(&path, &["branch", "--quiet", &format!("--set-upstream-to=origin/{target}")])?;
-        repo::git(&path, &["clean", "--quiet", "-d", "--force"])?;
         Ok(path)
     }
 
+    /// Puts the integration worktree's branch on `start` with no other files, ready for validation or a merge.
+    fn reset_integration_worktree(&self, path: &Path, start: &str) -> Result<()> {
+        let branch = format!("wl-integrate-{}", self.acceptance.target.replace('/', "-"));
+        repo::git(path, &["checkout", "--quiet", "--force", "--no-track", "-B", &branch, start])?;
+        repo::git(path, &["clean", "--quiet", "-d", "--force"])?;
+        Ok(())
+    }
+
     /// Merges the accepted commit onto the target in the integration worktree and runs the validation there.
+    /// Reads go through gix; git runs only to fetch, check out, clean and merge.
     fn prepare(&self) -> Result<(String, String)> {
         let path = self.integration_worktree()?;
-        let base = repo::git(&path, &["rev-parse", "HEAD"])?;
+        let target_ref = format!("refs/remotes/origin/{}", self.acceptance.target);
+        let main = repo::open_refs_only(&self.ws.layout.main_worktree)?;
+        let base_id = repo::resolve(&main, &target_ref)?.ok_or_else(|| Error::new(format!("{target_ref} does not exist after fetching")))?;
+        let base = base_id.to_string();
         let commit = &self.acceptance.commit;
-        if repo::git(&path, &["merge-base", "--is-ancestor", commit, &base]).is_ok() {
+        let commit_id: gix::ObjectId = commit.parse().map_err(|e| Error::new(format!("accepted commit: {e}")))?;
+        if repo::is_ancestor(&main, commit_id, base_id)? {
             // Already in the target, which was validated when it got there.
             return Ok((base.clone(), base));
         }
-        if repo::git(&path, &["merge-base", "--is-ancestor", &base, commit]).is_ok() {
-            repo::git(&path, &["merge", "--quiet", "--ff-only", commit])?;
+        let merged = if repo::is_ancestor(&main, base_id, commit_id)? {
+            self.reset_integration_worktree(&path, commit)?;
+            commit_id
         } else {
+            self.reset_integration_worktree(&path, &base)?;
             let message = format!("Merge {} into {}", self.record()?.branch, self.acceptance.target);
             if let Err(error) = repo::git(&path, &["merge", "--quiet", "--no-ff", "--no-edit", "-m", &message, commit]) {
                 repo::git(&path, &["merge", "--abort"]).ok();
                 return Err(Error::new(format!("{commit} does not merge onto {} at {base}: {error}", self.acceptance.target)));
             }
-        }
-        let merged = repo::git(&path, &["rev-parse", "HEAD"])?;
-        let id: gix::ObjectId = merged.parse().map_err(|e| Error::new(format!("{e}")))?;
+            repo::open_refs_only(&path)?.head_id()?.detach()
+        };
+        let id = merged;
+        let merged = merged.to_string();
         let steps = config::repo_config(&repo::open_refs_only(&self.ws.layout.main_worktree)?, id)?.validation;
         let log_path = self.ws.store.log(self.task().as_str(), self.acceptance.attempt);
         let offload = config::machine_config()?.offload;
@@ -410,7 +425,7 @@ impl Worker<'_> {
         let path = self.integration_worktree_unchanged()?;
         let target = &self.acceptance.target;
         repo::git(&path, &["fetch", "--quiet", "origin", &format!("+refs/heads/{target}:refs/remotes/origin/{target}")])?;
-        let remote_tip = repo::git(&path, &["rev-parse", &format!("refs/remotes/origin/{target}")])?;
+        let remote_tip = repo::resolve(&repo::open_refs_only(&path)?, &format!("refs/remotes/origin/{target}"))?.map(|id| id.to_string()).unwrap_or_default();
         let merged = progress.merged.clone().unwrap_or_default();
         if remote_tip == merged {
             self.leave_queue();
@@ -440,12 +455,23 @@ impl Worker<'_> {
             return Ok(());
         }
         // The configured URL, before any insteadOf rewriting, names the GitHub repository.
-        let url = repo::git(&self.ws.layout.main_worktree, &["config", "--get", "remote.origin.url"])?;
+        let main = repo::open(&self.ws.layout.main_worktree)?;
+        let url = main.config_snapshot().string("remote.origin.url").map(|u| u.to_string()).ok_or_else(|| Error::new("origin has no URL"))?;
         let slug = github_slug(&url).ok_or_else(|| Error::new(format!("origin {url} is not a GitHub repository")))?;
         let start = Instant::now();
         let mut failures = 0;
+        let mut github: Option<GitHub> = None;
         loop {
-            match check_states(&slug, &commit.to_string(), checks) {
+            let states = match &github {
+                Some(github) => Ok(github),
+                None => GitHub::connect().map(|g| &*github.insert(g)),
+            }
+            .and_then(|github| check_states(github, &slug, &commit.to_string(), checks));
+            if states.is_err() {
+                // A token that expired is read again on the next poll.
+                github = None;
+            }
+            match states {
                 Ok(states) => {
                     failures = 0;
                     if let Some((check, state)) = states.iter().find(|(_, s)| matches!(s, CheckState::Failed(_))) {
@@ -533,17 +559,50 @@ fn github_slug(url: &str) -> Option<String> {
     (slug.split('/').count() == 2).then(|| slug.to_owned())
 }
 
-/// The state of each required check on `sha`: the latest run with the same app and name, as the legacy lifecycle reads it.
-fn check_states<'a>(slug: &str, sha: &str, checks: &'a [RequiredCheck]) -> Result<Vec<(&'a RequiredCheck, CheckState)>> {
-    let output = crate::repo::command("gh")
-        .args(["api", &format!("repos/{slug}/commits/{sha}/check-runs?per_page=100")])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| Error::new(format!("cannot start gh: {e}")))?;
-    if !output.status.success() {
-        return Err(Error::new(String::from_utf8_lossy(&output.stderr).trim().to_owned()));
+/// The GitHub API, read in this process: a poll that started `gh` every few seconds would start a process each time,
+/// and on Windows every process start slows the foreground commands that start meanwhile.
+struct GitHub {
+    agent: ureq::Agent,
+    api: String,
+    token: String,
+}
+
+impl GitHub {
+    /// Takes the token from `gh`, once per wait. `WL_GITHUB_API` replaces the API's address, for tests.
+    fn connect() -> Result<GitHub> {
+        let output = crate::repo::command("gh")
+            .args(["auth", "token"])
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| Error::new(format!("cannot start gh: {e}")))?;
+        if !output.status.success() {
+            return Err(Error::new(format!("gh auth token: {}", String::from_utf8_lossy(&output.stderr).trim())));
+        }
+        let agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(60))).build().into();
+        Ok(GitHub {
+            agent,
+            api: std::env::var("WL_GITHUB_API").unwrap_or_else(|_| "https://api.github.com".to_owned()),
+            token: String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        })
     }
-    let body: Value = serde_json::from_slice(&output.stdout)?;
+
+    fn get(&self, path: &str) -> Result<Value> {
+        let mut response = self
+            .agent
+            .get(format!("{}/{path}", self.api.trim_end_matches('/')))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("User-Agent", "wl")
+            .call()
+            .map_err(|e| Error::new(format!("GitHub API {path}: {e}")))?;
+        let body = response.body_mut().read_to_string().map_err(|e| Error::new(format!("GitHub API {path}: {e}")))?;
+        Ok(serde_json::from_str(&body)?)
+    }
+}
+
+/// The state of each required check on `sha`: the latest run with the same app and name, as the legacy lifecycle reads it.
+fn check_states<'a>(github: &GitHub, slug: &str, sha: &str, checks: &'a [RequiredCheck]) -> Result<Vec<(&'a RequiredCheck, CheckState)>> {
+    let body = github.get(&format!("repos/{slug}/commits/{sha}/check-runs?per_page=100"))?;
     let runs = body["check_runs"].as_array().cloned().unwrap_or_default();
     Ok(checks
         .iter()

@@ -240,19 +240,25 @@ pub(crate) fn retire_task(ws: &Workspace, task: &TaskName, expected_head: Option
             return Err(Error::new(format!("task {task} has uncommitted or untracked files in {}", worktree.display())));
         }
         let branch_ref = format!("refs/heads/{}", record.branch);
-        if let Ok(tip) = repo::git(&worktree, &["rev-parse", "--verify", "--quiet", &branch_ref]) {
+        let slot = repo::open_refs_only(&worktree)?;
+        if let Some(tip_id) = repo::resolve(&slot, &branch_ref)? {
+            let tip = tip_id.to_string();
             if let Some(expected) = expected_head {
                 if tip != expected {
                     return Err(Error::new(format!("task {task} has commits after the integrated {expected}; retire it after the next finish")));
                 }
             }
             let integrated_into = record.target.as_ref().map_or("refs/remotes/origin/HEAD".to_owned(), |t| format!("refs/remotes/origin/{t}"));
-            let published = tip == record.base || repo::git(&worktree, &["merge-base", "--is-ancestor", &tip, &integrated_into]).is_ok();
+            let published = tip == record.base
+                || match repo::resolve(&slot, &integrated_into)? {
+                    Some(into) => repo::is_ancestor(&slot, tip_id, into)?,
+                    None => false,
+                };
             if !published {
                 return Err(Error::new(format!("task {task} has commits that are not in {integrated_into}")));
             }
             repo::git(&worktree, &["switch", "--quiet", "--detach", &tip])?;
-            repo::git(&worktree, &["branch", "--quiet", "--delete", "--force", &record.branch])?;
+            slot.find_reference(branch_ref.as_str())?.delete()?;
         }
         clear_ignored(&worktree)?;
     }

@@ -280,19 +280,45 @@ fn the_target_waits_for_required_checks_and_a_failed_check_needs_action() {
     git(&f.main, &["config", &format!("url.{}.insteadOf", f.origin.display()), "https://github.com/example/product.git"]);
     let bin = f.dir.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let conclusion = f.dir.path().join("conclusion.txt");
-    std::fs::write(&conclusion, "").unwrap();
-    let gh = format!(
-        "#!/bin/sh\nc=$(cat {})\nif [ -z \"$c\" ]; then echo '{{\"check_runs\":[]}}'; else echo '{{\"check_runs\":[{{\"id\":1,\"name\":\"test\",\"app\":{{\"slug\":\"github-actions\"}},\"status\":\"completed\",\"conclusion\":\"'$c'\",\"html_url\":\"u\"}}]}}'; fi\n",
-        conclusion.display()
-    );
-    std::fs::write(bin.join("gh"), gh).unwrap();
+    // gh only hands over the token; the check runs come from a local stand-in for the GitHub API.
+    let gh_calls = f.dir.path().join("gh-calls.txt");
+    std::fs::write(bin.join("gh"), format!("#!/bin/sh\necho \"$*\" >> {}\necho the-token\n", gh_calls.display())).unwrap();
     std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let conclusion = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    {
+        let (conclusion, requests) = (conclusion.clone(), requests.clone());
+        std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut head = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                    head.push_str(&line);
+                }
+                requests.lock().unwrap().push(head);
+                let c = conclusion.lock().unwrap().clone();
+                let body = if c.is_empty() {
+                    r#"{"check_runs":[]}"#.to_owned()
+                } else {
+                    format!(r#"{{"check_runs":[{{"id":1,"name":"test","app":{{"slug":"github-actions"}},"status":"completed","conclusion":"{c}","html_url":"u"}}]}}"#)
+                };
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+    }
     let before = f.origin_main();
     let run = |args: &[&str]| {
         let out = Command::new(env!("CARGO_BIN_EXE_wl")).arg("--repo").arg(&f.main).args(args)
-            .env("PATH", &path).env("WL_CONFIG", f.dir.path().join("config.json"))
+            .env("PATH", &path).env("WL_CONFIG", f.dir.path().join("config.json")).env("WL_GITHUB_API", &api)
             .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t")
             .output().unwrap();
         serde_json::from_slice::<Value>(&out.stdout).unwrap()
@@ -300,7 +326,7 @@ fn the_target_waits_for_required_checks_and_a_failed_check_needs_action() {
     run(&["finish", "alpha"]);
     std::thread::sleep(Duration::from_secs(3));
     assert_eq!(f.origin_main(), before, "nothing reaches the target while the check is pending");
-    std::fs::write(&conclusion, "failure").unwrap();
+    *conclusion.lock().unwrap() = "failure".to_owned();
     let start = Instant::now();
     loop {
         let status = run(&["status", "alpha"]);
@@ -312,6 +338,10 @@ fn the_target_waits_for_required_checks_and_a_failed_check_needs_action() {
         std::thread::sleep(Duration::from_millis(200));
     }
     assert_eq!(f.origin_main(), before);
+    let requests = requests.lock().unwrap().clone();
+    assert!(requests[0].contains("/repos/example/product/commits/"), "{requests:?}");
+    assert!(requests.iter().all(|r| r.to_lowercase().contains("authorization: bearer the-token")), "{requests:?}");
+    assert_eq!(std::fs::read_to_string(&gh_calls).unwrap(), "auth token\n", "gh starts once per wait, not once per poll");
     let _ = worktree;
 }
 

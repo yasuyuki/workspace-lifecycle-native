@@ -9,6 +9,7 @@ gix = { workspace = true, features = ["revision"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 toml = { version = "1.2.1", default-features = false, features = ["parse", "serde", "std"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

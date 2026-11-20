@@ -151,6 +151,22 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     command
 }
 
+/// Whether `ancestor` is `descendant` or one of its ancestors, as `git merge-base --is-ancestor` answers it.
+pub fn is_ancestor(repo: &gix::Repository, ancestor: gix::ObjectId, descendant: gix::ObjectId) -> Result<bool> {
+    if ancestor == descendant {
+        return Ok(true);
+    }
+    Ok(repo.merge_base(ancestor, descendant)?.is_some_and(|base| base.detach() == ancestor))
+}
+
+/// The object a reference points at after peeling, or `None` when the reference does not exist.
+pub fn resolve(repo: &gix::Repository, name: &str) -> Result<Option<gix::ObjectId>> {
+    match repo.try_find_reference(name)? {
+        Some(mut reference) => Ok(Some(reference.peel_to_id()?.detach())),
+        None => Ok(None),
+    }
+}
+
 pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let mut command = command("git");
     // Automatic gc and maintenance would hold ref locks that a foreground command then waits for.

@@ -3,7 +3,7 @@ members = ["probe", "wl"]
 resolver = "3"
 
 [workspace.dependencies]
-gix = { version = "0.90.0", default-features = false, features = ["status", "max-performance", "sha1"] }
+gix = { version = "0.90.0", default-features = false, features = ["status", "revision", "max-performance", "sha1"] }
 
 [profile.release]
 lto = "thin"

@@ -17,7 +17,9 @@ Windows で開発 session を動かす人と agent が、task の開始から統
 | offload 実行先 | WSL の `Ubuntu-26.04` | offload 専用の user と directory。`any` の validation 手順を走らせる（ADR 0014） |
 | push 判定 | 既存の `workspace_lifecycle.push` | worker が push の前に呼ぶ（ADR 0012） |
 
-Git の読取りは gix でプロセス内から行う。設定は system、application、user の file を includes つきで読み、環境変数からの設定は読まない。Windows では gix が system の設定と attributes の場所を知るために git を起動するので、`wl` は Git の root を user ごとに `%LOCALAPPDATA%\wl\git-root` へ cache し、`EXEPATH` に入れてから開く。Git Bash は `EXEPATH` に Git の `bin` の path を入れるが、これは root ではないので、cache の root で置き換える。`wl` が起動する他の program には、呼び手の `EXEPATH` を渡す。git CLI は push、merge、fetch、slot の作成と差分の切替だけに使う。
+Git の読取りは gix でプロセス内から行う。設定は system、application、user の file を includes つきで読み、環境変数からの設定は読まない。Windows では gix が system の設定と attributes の場所を知るために git を起動するので、`wl` は Git の root を user ごとに `%LOCALAPPDATA%\wl\git-root` へ cache し、`EXEPATH` に入れてから開く。Git Bash は `EXEPATH` に Git の `bin` の path を入れるが、これは root ではないので、cache の root で置き換える。`wl` が起動する他の program には、呼び手の `EXEPATH` を渡す。git CLI は、push、merge、fetch、slot と integration worktree の作成・checkout・clean、未追跡の file を含む変更の確認だけに使う。ref の解決と祖先の判定は、background work でも gix で行う。Windows では、background work が process を起動している間、前景の command の起動も遅くなるからである。同じ理由で、required check の状態は GitHub API を process 内の HTTP で読む。`gh` は待ちごとに一度、token を得るためにだけ起動する。
+
+1 回の `finish --retire`（fast-forward、validation と required check なし）で worker と退役が起動する git は、11 回である。以前は 22 回だった。check の待ちで、15 秒ごとに `gh` を起動することもなくなった。
 
 切り離した process は、Windows では標準 handle を継承させず、優先度を通常より低くして起動する。継承させると、呼び手が `wl` の出力の終わりを待つ間、background work の終了まで待たされる。
 
@@ -111,4 +113,3 @@ user ごとの設定 file の `offload` に、WSL で command を実行する前
 - needs-action のときに Issue へコメントする option（ADR 0006）
 - 複数の finish をまとめて統合する merge train（ADR 0011）
 - push 判定の Rust への移植（ADR 0012）
-- background work が起動する git の回数の削減。Windows では、background work が process を作っている間、前景の command の起動も遅くなる（Issue #1 の P2 の記録）
