@@ -121,9 +121,24 @@ pub fn resolve_base(repo: &gix::Repository, spec: Option<&str>) -> Result<gix::O
     }
 }
 
+/// A process without a console, such as the detached finish worker, gives every console program it starts
+/// a new console, and Windows shows that console as a window until the program exits. Those programs get
+/// a console without a window instead. A process with a console keeps sharing it with its children.
+#[cfg(windows)]
+fn hide_console(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // SAFETY: GetConsoleWindow only reads which console this process is attached to.
+    if unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() }.is_null() {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 /// Starts a program other than `wl` with the caller's environment.
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut command = Command::new(program);
+    #[cfg(windows)]
+    hide_console(&mut command);
     match CALLER_EXEPATH.get() {
         Some(Some(value)) => {
             command.env("EXEPATH", value);
