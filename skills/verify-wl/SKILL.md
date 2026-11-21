@@ -14,10 +14,13 @@ Build `wl` from the selected `workspace-lifecycle-native` checkout into an isola
 scratch directory and drive the compiled `wl` executable as a user/agent does:
 `begin`, `hold`, `finish` refusal while held, `release-hold`, commit with
 declared `slot_cache` and undeclared ignored files, `finish --retire`, polling
-`status` until retirement, slot reuse on a second `begin`, and explicit `retire`.
-Validation and push preflight use local synthetic scripts; no GitHub API or WSL
-offload is invoked. See [the feature map](features/README.md) for proven scope
-and `not-run` surfaces.
+`status` and `status [TASK] --finish ID` until retirement, confirming the retired
+run stays readable by `FinishId` after notice drain while `status <task>`,
+mismatched `status <other> --finish ID`, and unknown `--finish` ID fail, slot
+reuse on a second `begin`, explicit `retire`, and task-name reuse isolation on
+re-beginning the retired name. Validation and push preflight use local synthetic
+scripts; no GitHub API or WSL offload is invoked. See [the feature map](features/README.md)
+for proven scope and `not-run` surfaces.
 
 Requirements: Python 3.10+, Rust/Cargo with locked dependencies available (or
 network for first Cargo build), and Git.
@@ -53,8 +56,8 @@ tool versions) without building or driving `wl`. Pass `--help` for all options.
    literal expectation.
 4. **Evidence.** Writes `result.json` before Drive and after every command and
    assertion. Copies `preflight.py`, `preflight-log.txt`, `validation-ran.txt`,
-   `.git/wl/logs/alpha-1.log`, and `final-status.json` into the evidence
-   directory outside scratch.
+   `.git/wl/logs/alpha-1.log`, `final-status.json`, and
+   `finish-status-after-retire.json` into the evidence directory outside scratch.
 5. **Cleanup.** Waits for background slot preparation (`background: false`) so
    detached workers release handles, removes only this run's scratch directory
    (retrying read-only Git files), and verifies `cleanup.ok` and
@@ -66,6 +69,6 @@ reporting a pass, read `result.json` and check `status`, `assertions`,
 retained artifacts forces `status: "fail"` even when all feature assertions pass.
 
 `python skills/verify-wl/scripts/test_verify.py` checks detector behavior on
-disposable copies (pass on real checkout, fail on faulty copy whose `retire`
-exits 0 while skipping `clear_ignored`, `blocked` on invalid repo, `not-run` on
+disposable copies (pass on real checkout, fail on faulty copies skipping
+`clear_ignored` or `write_retired_run`, `blocked` on invalid repo, `not-run` on
 `--doctor-only`).

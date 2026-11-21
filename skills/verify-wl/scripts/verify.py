@@ -48,9 +48,10 @@ EXPECTATIONS = {
     "build": "Checkout copies to scratch and `cargo build --locked -p wl` builds `wl` binary whose `help` lists begin, status, hold, release-hold, finish, retire.",
     "begin": "`wl begin alpha` exits 0 with ok=true, stage=ready, branch=alpha, worktree under product.slots, main checkout stays on main.",
     "hold-and-refuse": "`wl hold alpha` records hold, `wl finish alpha` while held exits 2 with error mentioning held and leaves origin/main unchanged, `wl release-hold` clears hold.",
-    "finish-retire": "`wl finish alpha --retire` from inside the slot exits 0 with accepted=true, attempt=1, commit=HEAD, target=main.",
+    "finish-retire": "`wl finish alpha --retire` from inside the slot exits 0 with accepted=true, non-empty id, retire=true, attempt=1, commit=HEAD, target=main.",
     "integrated-and-retired": "Worker validates HEAD in integrate-main, runs preflight, pushes alpha and main, delivers one retired notice, deletes local branch alpha, keeps slot_cache `cache_keep/keep.txt`, and deletes undeclared `scratch_drop`.",
-    "slot-reuse-and-retire": "`wl begin beta` reuses alpha's slot path and `wl retire beta` exits 0 with retired=true.",
+    "post-retire-finish-status": "After notice drain, `wl status alpha` exits 2 (ok=false), while `wl status --finish <id>` and `wl status alpha --finish <id>` report stage=retired on HEAD with detail=null; wrong-task and unknown `--finish` exit 2.",
+    "slot-reuse-and-name-isolation": "`wl begin beta` reuses alpha's slot path with cache_keep intact, `wl retire beta` succeeds, and re-beginning and retiring alpha starts with finish=null while keeping original `status --finish <id>` intact.",
 }
 
 NOT_RUN = [
@@ -115,7 +116,7 @@ def doctor(repo: Path) -> dict:
         "rustc": run_cmd(["rustc", "--version"], repo).stdout.strip() if shutil.which("rustc") else "unknown",
         "python": platform.python_version(),
         "platform": platform.platform(),
-        "entry_point": "built `wl` executable: begin, hold, release-hold, finish --retire, status, retire",
+        "entry_point": "built `wl` executable: begin, hold, release-hold, finish --retire, status [TASK] [--finish ID], retire",
     }
 
 
@@ -392,7 +393,10 @@ def run_verify(repo: Path, evidence_root: Path | None = None, doctor_only: bool 
         )
         assertion("finish exit 0", 0, finish_proc.returncode)
         finish_json = json.loads(finish_proc.stdout)
+        finish_id = finish_json.get("id")
         assertion("finish accepted", True, finish_json.get("accepted"))
+        assertion("finish id present", True, isinstance(finish_id, str) and len(finish_id) > 0)
+        assertion("finish retire true", True, finish_json.get("retire") is True)
         assertion("finish attempt 1", 1, finish_json.get("attempt"))
         assertion("finish commit matches HEAD", alpha_head, finish_json.get("commit"))
         assertion("finish target main", "main", finish_json.get("target"))
@@ -400,7 +404,20 @@ def run_verify(repo: Path, evidence_root: Path | None = None, doctor_only: bool 
         notices = []
         deadline = time.monotonic() + DEADLINE
         retired_seen = False
+        poll_checked = False
         while time.monotonic() < deadline:
+            if not poll_checked:
+                fin_poll_proc = run_cmd([str(wl_bin), "--repo", str(product), "status", "--finish", finish_id], product, env=drive_env)
+                fin_poll = json.loads(fin_poll_proc.stdout)
+                assertion(
+                    "status --finish tracks running execution",
+                    True,
+                    fin_poll_proc.returncode == 0
+                    and fin_poll.get("ok") is True
+                    and fin_poll.get("finish", {}).get("id") == finish_id
+                    and fin_poll.get("finish", {}).get("task") == "alpha",
+                )
+                poll_checked = True
             st = json.loads(
                 run_cmd([str(wl_bin), "--repo", str(product), "status"], product, env=drive_env).stdout
             )
@@ -408,7 +425,10 @@ def run_verify(repo: Path, evidence_root: Path | None = None, doctor_only: bool 
             alpha_entries = [t for t in st.get("tasks", []) if t.get("task") == "alpha"]
             if alpha_entries and alpha_entries[0].get("finish", {}).get("stage") == "needs-action":
                 raise AssertionError(f"alpha entered needs-action: {alpha_entries[0]}")
-            if not alpha_entries and any(n.get("stage") == "retired" and n.get("task") == "alpha" for n in notices):
+            if not alpha_entries and any(
+                n.get("stage") == "retired" and n.get("task") == "alpha" and n.get("id") == finish_id
+                for n in notices
+            ):
                 retired_seen = True
                 break
             time.sleep(0.1)
@@ -429,6 +449,71 @@ def run_verify(repo: Path, evidence_root: Path | None = None, doctor_only: bool 
 
         assertion("notices handed over once", None, after_status.get("notices"))
         assertion("at least one free slot", True, after_status["slots"]["free"] >= 1)
+
+        alpha_after_proc = execute(
+            "status alpha after retire",
+            [str(wl_bin), "--repo", str(product), "status", "alpha"],
+            product,
+            env=drive_env,
+        )
+        assertion("status alpha retired exits 2", 2, alpha_after_proc.returncode)
+        assertion("status alpha retired ok false", False, json.loads(alpha_after_proc.stdout).get("ok"))
+
+        fin_status_proc = execute(
+            "status --finish after retire",
+            [str(wl_bin), "--repo", str(product), "status", "--finish", finish_id],
+            product,
+            env=drive_env,
+        )
+        assertion("status --finish exit 0", 0, fin_status_proc.returncode)
+        fin_status = json.loads(fin_status_proc.stdout)
+        (evidence / "finish-status-after-retire.json").write_text(
+            json.dumps(fin_status, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        result["artifacts"].append("finish-status-after-retire.json")
+        save_result()
+
+        fin_obj = fin_status.get("finish", {})
+        assertion("status --finish ok", True, fin_status.get("ok"))
+        assertion("status --finish id", finish_id, fin_obj.get("id"))
+        assertion("status --finish task", "alpha", fin_obj.get("task"))
+        assertion("status --finish attempt", 1, fin_obj.get("attempt"))
+        assertion("status --finish commit", alpha_head, fin_obj.get("commit"))
+        assertion("status --finish merged", alpha_head, fin_obj.get("merged"))
+        assertion("status --finish target", "main", fin_obj.get("target"))
+        assertion("status --finish retire", True, fin_obj.get("retire"))
+        assertion("status --finish reports stage retired", "retired", fin_obj.get("stage"))
+        assertion("status --finish detail null", None, fin_obj.get("detail"))
+
+        fin_task_proc = execute(
+            "status alpha --finish after retire",
+            [str(wl_bin), "--repo", str(product), "status", "alpha", "--finish", finish_id],
+            product,
+            env=drive_env,
+        )
+        assertion("status alpha --finish exit 0", 0, fin_task_proc.returncode)
+        fin_task_obj = json.loads(fin_task_proc.stdout).get("finish", {})
+        assertion("status alpha --finish id", finish_id, fin_task_obj.get("id"))
+        assertion("status alpha --finish stage retired", "retired", fin_task_obj.get("stage"))
+
+        fin_mismatch_proc = execute(
+            "status beta --finish mismatch",
+            [str(wl_bin), "--repo", str(product), "status", "beta", "--finish", finish_id],
+            product,
+            env=drive_env,
+        )
+        assertion("status beta --finish mismatch exits 2", 2, fin_mismatch_proc.returncode)
+        assertion("status beta --finish mismatch ok false", False, json.loads(fin_mismatch_proc.stdout).get("ok"))
+
+        fin_missing_proc = execute(
+            "status --finish missing",
+            [str(wl_bin), "--repo", str(product), "status", "--finish", "missing-id"],
+            product,
+            env=drive_env,
+        )
+        assertion("status --finish missing exits 2", 2, fin_missing_proc.returncode)
+        assertion("status --finish missing ok false", False, json.loads(fin_missing_proc.stdout).get("ok"))
+
         assertion(
             "origin/main integrated alpha HEAD",
             alpha_head,
@@ -473,6 +558,7 @@ def run_verify(repo: Path, evidence_root: Path | None = None, doctor_only: bool 
         beta_json = json.loads(beta_begin.stdout)
         assertion("begin beta stage ready", "ready", beta_json.get("stage"))
         assertion("beta reuses alpha slot", str(worktree), str(Path(beta_json["worktree"]).resolve()))
+        assertion("slot_cache keep.txt survives reuse", True, (worktree / "cache_keep" / "keep.txt").is_file())
 
         beta_retire = execute(
             "wl retire beta",
@@ -482,6 +568,47 @@ def run_verify(repo: Path, evidence_root: Path | None = None, doctor_only: bool 
         )
         assertion("retire beta exit 0", 0, beta_retire.returncode)
         assertion("retire beta retired true", True, json.loads(beta_retire.stdout).get("retired"))
+
+        alpha_rebegin = execute(
+            "wl begin alpha rebegin",
+            [str(wl_bin), "--repo", str(product), "begin", "alpha", "--request", "verify/rebegin"],
+            product,
+            env=drive_env,
+        )
+        assertion("rebegin alpha exit 0", 0, alpha_rebegin.returncode)
+        alpha_rebegin_json = json.loads(alpha_rebegin.stdout)
+        assertion("rebegin alpha stage ready", "ready", alpha_rebegin_json.get("stage"))
+        assertion("rebegin alpha finish null", None, alpha_rebegin_json.get("finish"))
+
+        alpha_rebegin_status = json.loads(
+            execute(
+                "status alpha after rebegin",
+                [str(wl_bin), "--repo", str(product), "status", "alpha"],
+                product,
+                env=drive_env,
+            ).stdout
+        )
+        assertion("status alpha after rebegin finish null", None, alpha_rebegin_status["tasks"][0].get("finish"))
+
+        alpha_reretire = execute(
+            "wl retire alpha rebegin",
+            [str(wl_bin), "--repo", str(product), "retire", "alpha"],
+            product,
+            env=drive_env,
+        )
+        assertion("retire alpha exit 0", 0, alpha_reretire.returncode)
+        assertion("retire alpha retired true", True, json.loads(alpha_reretire.stdout).get("retired"))
+
+        fin_after_rebegin_proc = execute(
+            "original status --finish after rebegin",
+            [str(wl_bin), "--repo", str(product), "status", "--finish", finish_id],
+            product,
+            env=drive_env,
+        )
+        assertion("original status --finish exit 0", 0, fin_after_rebegin_proc.returncode)
+        fin_after_rebegin = json.loads(fin_after_rebegin_proc.stdout).get("finish", {})
+        assertion("original status --finish still retired", "retired", fin_after_rebegin.get("stage"))
+        assertion("original status --finish still alpha HEAD", alpha_head, fin_after_rebegin.get("commit"))
 
         result["status"] = result["feature_status"] = "pass"
     except (OSError, ValueError, AssertionError, KeyError, IndexError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:

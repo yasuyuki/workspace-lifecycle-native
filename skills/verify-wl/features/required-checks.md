@@ -68,6 +68,6 @@ run's scratch repository. If the worker is waiting when a check fails, the
 helper supplies a failing required run so it can exit. When cleanup cannot
 confirm completion, retain the scratch path in `result.json` for diagnosis.
 
-Live GitHub, WSL offload, and Windows toast delivery remain outside this
-recipe. The [formal skill](../../verify-required-checks/SKILL.md) covers bounded
+Live GitHub, WSL offload, Windows toast delivery, and `CheckState::Unfinalized`
+([#6](https://github.com/yasuyuki/workspace-lifecycle-native/issues/6), covered by `wl/tests/finish.rs`) remain outside this recipe. The [formal skill](../../verify-required-checks/SKILL.md) covers bounded
 required-check transitions and the failed-suite mutation.

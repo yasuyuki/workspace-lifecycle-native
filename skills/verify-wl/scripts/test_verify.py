@@ -62,6 +62,21 @@ class VerifyWlSkillTests(unittest.TestCase):
         self.assertEqual(failed, ["undeclared scratch_drop removed"])
         self.assert_cleaned(result, evidence)
 
+    def test_faulty_copy_skipping_write_retired_run_fails(self):
+        copy = self.base / "faulty_retired_run"
+        shutil.copytree(ROOT, copy, ignore=shutil.ignore_patterns(".git", "target"))
+        finish_rs = copy / "wl" / "src" / "finish.rs"
+        text = finish_rs.read_text(encoding="utf-8")
+        needle = "    write_run_stage(ws, acceptance, progress, Some(Stage::Retired))"
+        self.assertEqual(text.count(needle), 1)
+        finish_rs.write_text(text.replace(needle, "    let _ = (ws, acceptance, progress);\n    Ok(())"), encoding="utf-8")
+
+        code, result, evidence = self.run_helper(copy, "--agent", "test_faulty_retired_run")
+        self.assertEqual((code, result["status"], result["target"]["revision"]), (1, "fail", "unknown"))
+        failed = [a["name"] for a in result["assertions"] if not a["ok"]]
+        self.assertEqual(failed, ["status --finish reports stage retired"])
+        self.assert_cleaned(result, evidence)
+
     def test_wrong_checkout_is_blocked_and_doctor_only_is_not_run(self):
         code, result, _ = self.run_helper(self.base)
         self.assertEqual((code, result["status"], result["feature_status"]), (2, "blocked", "not-run"))
