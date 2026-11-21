@@ -26,6 +26,7 @@ ChartNext ==
   \/ BeginEnsureCheckout("a1")
   \/ BeginSwitchAndReady("a1")
   \/ RetireCheckAndClean("a")
+  \/ RetireReadOrder("a")
   \/ RetireRemoveTask("a")
   \/ RetireRemoveClaim("a")
   \/ ChartPrepareClaim

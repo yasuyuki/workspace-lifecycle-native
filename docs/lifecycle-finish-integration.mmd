@@ -32,8 +32,8 @@ stateDiagram-v2
   s2 --> s3: 順番と統合ロックを取得
   s3 --> s4: 検証失敗
   s4 --> s5: 要対応 (needs-action) を記録
-  s5 --> s6: queue を削除
   s5 --> s1: wl finish
+  s5 --> s6: queue を削除
   s3 --> s7: 進捗 Prepared を記録
   s6 --> s1: wl finish
   s7 --> s8: push 用統合ロックを取得

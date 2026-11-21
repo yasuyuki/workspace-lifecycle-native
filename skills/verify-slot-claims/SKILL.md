@@ -15,18 +15,18 @@ license: MIT
 - `NoOrphanClaimWhenIdle`: when no `begin`, `retire`, or `prepare_slot` operation is in progress, every `slots/<n>.claim` belongs to a live `tasks/<task>.json` pointing at slot `n` (for crash configs, enforced after `housekeeping()` / `prepare_slot()` recovery via `NoOrphanClaimAfterHousekeeping`).
 - `NoRetireUnsafeTask`: `retire_task()` never retires a task that is held, dirty/untracked, unpublished, or has a finish in progress.
 - `SlotBranchMatchesReadyTask`: every `TaskStage::Ready` task not mid-retirement has its slot checkout on its recorded branch.
+- `UniqueRetirementOrder`: no two retired slots share the same non-zero `retirement_order`.
+- `OldestRetiredSlotReusedFirst`: `claim_slot()` picks the unclaimed free slot with the earliest non-zero `retirement_order` before any never-retired free slot.
 
-**Harm when they break.** Leaked `.claim` or `#prepare` files permanently remove slots from the reusable pool so `wl` keeps cloning fresh checkouts, `wl begin` / `wl retire` races detach or overwrite another task's active slot branch mid-edit, or dirty/unpublished/held user work is erased during retirement.
+**Harm when they break.** Leaked `.claim` or `#prepare` files permanently remove slots from the reusable pool so `wl` keeps cloning fresh checkouts, `wl begin` / `wl retire` races detach or overwrite another task's active slot branch mid-edit, concurrent retirements collide on `retirement_order` or skip the oldest retired slot, or dirty/unpublished/held user work is erased during retirement.
 
-## Current status at `dce9d18489a94fad25344283e2e77505ce430112`
+## Current status at `0149b853f6f8611cb12b4f06cb83215fbc8e45d7`
 
-All seven configurations (`single-task-retire-guards`, `two-tasks-concurrent`, `finding-begin-base-error`, `finding-prepare-crash`, `finding-retire-crash`, `finding-same-task-begin-race`, `finding-begin-retire-race`) pass (`EXPECTED` is `None` for every config). The five findings recorded at `a0a389f` were resolved in commit `dce9d18`:
+All eight configurations (`single-task-retire-guards`, `two-tasks-concurrent`, `slot-reuse-order`, `finding-begin-base-error`, `finding-prepare-crash`, `finding-retire-crash`, `finding-same-task-begin-race`, `finding-begin-retire-race`) pass all ten invariants (`EXPECTED` is `None` for every config). In addition to the five findings resolved in `dce9d18`:
 
-1. `finding-begin-base-error` -> `begin()` (`wl/src/commands.rs:183-186`) now calls `repo::resolve_base(...)` before `ws.claim_slot(task)` and cleans up on `create_new_json` error (`commands.rs:201-204`).
-2. `finding-prepare-crash` -> `housekeeping()` (`wl/src/finish.rs:133`) calls `ws.reclaim_orphan_claims()` (`commands.rs:85-97`), `prepare_slot()` calls `reclaim_stale_prepare_claims_locked()` (`commands.rs:404`), and the existing-slot path cleans `#prepare` even on `has_changes` errors (`commands.rs:418-427`). Promise refinement for crash configs: `NoOrphanClaimAfterHousekeeping` verifies that once `housekeeping()` runs after a `SIGKILL`, zero stale `#prepare` claims remain (replacing strict pre-recovery `NoStalePrepareClaimWhenIdle` on the crash configs because `SIGKILL` cannot run destructors, evidenced by `wl/tests/cli.rs` `stale_prepare_and_orphan_task_claims_are_reclaimed_by_housekeeping`).
-3. `finding-retire-crash` -> `retire_task()` calls `ws.release_claims_for(task)` when `tasks/<task>.json` is absent (`commands.rs:272`), and `housekeeping()` / `prepare_slot()` run `reclaim_orphan_task_claims()` under non-blocking `try_lock_exclusive(&task_lock(t))` (`commands.rs:64-83`). Promise refinement for crash configs: verified via `NoOrphanClaimAfterHousekeeping`.
-4. `finding-same-task-begin-race` -> `begin()` holds `ws.lock_task(&task)` (`store.rs:28, 136`, `commands.rs:48-50, 178`) across lookup, claim, checkout, and `TaskStage::Ready` write, preventing duplicate claims from concurrent `wl begin <task>`.
-5. `finding-begin-retire-race` -> `retire_task()` holds `ws.lock_task(task)` (`commands.rs:269`) across checks and deletion, serializing `begin` and `retire` on the same task.
+1. `119601a` added `SlotRecord.retirement_order` (`wl/src/commands.rs:111-116, 144, 340-349`) and `Store::retirement_lock()` (`wl/src/store.rs:23`, `commands.rs:101, 337`), so `retire_task()` assigns monotonically increasing `retirement_order` values before removing `tasks/<task>.json` and `claim(n)` and `claim_slot()` reuses the earliest-retired free slot first (`slot-reuse-order`).
+2. Note on `finding-same-task-begin-race`: because `claim_slot()` now serializes slot selection under `retirement_lock()`, omitting `task_lock` in `begin()` still fails `TaskSlotMatchesClaim` (concurrent `reclaim_orphan_task_claims()` deletes the un-locked `claim` before `BeginWriteTask` writes `tasks/<task>.json`) rather than claiming two slots.
+3. `0149b85` added `finalize_retired_finish_locked()` inside `begin()` (`commands.rs:189`), `housekeeping()` (`finish.rs:219`), and absent-task `retire_task()` (`commands.rs:288`), and `write_retired_run()` / `clear_finish_files()` after `retire_task()`'s `retirement_lock` critical section (`commands.rs:356-359`); claim/slot ownership semantics remain preserved.
 
 ## When to use
 
@@ -37,26 +37,27 @@ sync=$(git log -1 --format=%H -- skills/verify-slot-claims)
 git diff "$sync" -- wl/src/commands.rs wl/src/store.rs wl/src/model.rs wl/src/finish.rs
 ```
 
-Empty output (or changes only inside `hold`, `release_hold`, `status`, or `Worker` internals outside `housekeeping`) means the model still describes the covered functions.
+Empty output (or changes only inside `hold`, `release_hold`, `status`, or `Worker` internals outside `housekeeping` and `finish_status`) means the model still describes the covered functions.
 
 ## Coverage
 
-Sync commit: `dce9d18489a94fad25344283e2e77505ce430112` (verified after commit `dce9d18`).
+Sync commit: `0149b853f6f8611cb12b4f06cb83215fbc8e45d7` (verified after commits `119601a` and `0149b85`).
 
-| Code at `dce9d18` (`wl/src/commands.rs` unless named) | Model action |
+| Code at `0149b85` (`wl/src/commands.rs` unless named) | Model action |
 | --- | --- |
-| `begin()` `ws.lock_task(&task)` (`store.rs:28, 136`, `commands.rs:48-50, 178`) | `BeginAcquireLock` |
-| `begin()` `resolve_base()` before `claim_slot()`, task lookup, initial claim scan (lines 180-186, 100-106) | `BeginResolveAndScan` / `BeginBaseError` |
-| `claim_slot()` / `claim_new_slot()` `Store::create_new(&claim(n), owner)` loop (lines 107-123) | `BeginCreateClaim` |
-| `begin()` `Store::create_new_json(&task_path, &fresh)` (lines 187-205) | `BeginWriteTask` |
-| `begin()` `ensure_slot_checkout()` worktree add + `slots/<n>.json` write (lines 215, 126-137) | `BeginEnsureCheckout` |
-| `begin()` `switch_slot()` dirty check, branch switch, `write_json(Ready)` (lines 217-252) | `BeginSwitchAndReady` |
-| `retire_task()` `lock_task()`, absent-task `release_claims_for()`, safety checks & clean (lines 268-310, 52-58) | `RetireCheckAndClean` |
-| `retire_task()` `Store::remove(&task_path)` (line 315) | `RetireRemoveTask` |
-| `retire_task()` conditional `Store::remove(&claim(n))` (lines 316-318) | `RetireRemoveClaim` / `RetireCrashAfterTaskDelete` |
-| `prepare_slot()` lock acquire, free/new `#prepare` claim creation (lines 401-430) | `PrepareClaimSlot` |
-| `prepare_slot()` checkout/fetch/settle + error-safe `Store::remove(&claim(n))` (lines 418-436) | `PrepareFinish` / `PrepareCrash` |
-| `finish::housekeeping()` (`finish.rs:133`) -> `reclaim_orphan_claims()` (lines 60-97) | `HousekeepingReclaim` |
+| `begin()` `ws.lock_task(&task)` (`store.rs:31, 139`, `commands.rs:48-50, 188`) | `BeginAcquireLock` |
+| `begin()` `resolve_base()` before `claim_slot()`, task lookup, `retirement_lock`, initial claim scan (lines 191-196, 100-107) | `BeginResolveAndScan` / `BeginBaseError` |
+| `claim_slot()` / `claim_new_slot()` earliest-`retirement_order` choice + `Store::create_new(&claim(n), owner)` (lines 108-132) | `BeginCreateClaim` |
+| `begin()` `Store::create_new_json(&task_path, &fresh)` (lines 198-216) | `BeginWriteTask` |
+| `begin()` `ensure_slot_checkout()` worktree add + `slots/<n>.json` (`retirement_order: None`) (lines 226, 135-147) | `BeginEnsureCheckout` |
+| `begin()` `switch_slot()` dirty check, branch switch, `write_json(Ready)` (lines 227-263) | `BeginSwitchAndReady` |
+| `retire_task()` `lock_task()`, absent-task cleanup, safety checks & clean (lines 279-333, 52-59) | `RetireCheckAndClean` |
+| `retire_task()` `retirement_lock()` acquire + max `retirement_order` scan (lines 334-347; `store.rs:23`) | `RetireReadOrder` |
+| `retire_task()` `retirement_order` write (lines 348-349) + `Store::remove(&task_path)` (line 351) | `RetireRemoveTask` |
+| `retire_task()` conditional `Store::remove(&claim(n))` + drop `retirement_lock` (lines 352-355) | `RetireRemoveClaim` / `RetireCrashAfterTaskDelete` |
+| `prepare_slot()` lock acquire, free/new `#prepare` claim creation (lines 449-490) | `PrepareClaimSlot` |
+| `prepare_slot()` checkout/fetch/settle + error-safe `Store::remove(&claim(n))` (lines 466-490) | `PrepareFinish` / `PrepareCrash` |
+| `finish::housekeeping()` (`finish.rs:213-225`) -> `reclaim_orphan_claims()` (lines 61-97) | `HousekeepingReclaim` |
 | Concurrent `hold` / dirty worktree / unpublished commit / active finish | `ToggleHold`, `ToggleDirty`, `ToggleUnpublished`, `ToggleFinishRunning` |
 
 ## Run
@@ -81,10 +82,10 @@ If a run disagrees with `EXPECTED`:
 2. **Intentional contract change**: confirm against code and tests, update `EXPECTED`, the Coverage table, and status above, and advance the sync note only after re-running `--mutants`.
 3. **Mutant no longer caught**: either the guard/lock/reclaim in `wl/src/` regressed or `MUTANTS` text in `scripts/check.py` drifted out of sync with `SlotClaims.tla`.
 
-To confirm the check catches a real code change on a scratch copy, remove `let _task_lock = ws.lock_task(&task)?;` in `wl/src/commands.rs` (`begin()` line 178), apply the matching edit in `model/SlotClaims.tla` (`BeginAcquireLock` `IF TRUE` -> `IF FALSE`), run `scripts/check.py` and observe `match: false` on `finding-same-task-begin-race` (`AtMostOneClaimPerTask`), then drop both edits and re-verify exit `0`.
+To confirm the check catches a real code change on a scratch copy, remove `let _task_lock = ws.lock_task(&task)?;` in `wl/src/commands.rs` (`begin()` line 188) and flip `BeginAcquireLock` (`IF TRUE` -> `IF FALSE`) in `model/SlotClaims.tla` to see `finding-same-task-begin-race` fail `TaskSlotMatchesClaim`, or remove `(order.is_none(), order, n)` ordering in `claim_slot()` (`commands.rs:113`) and flip `BeginCreateClaim` (`IF TRUE` -> `IF FALSE`) to see `slot-reuse-order` fail `OldestRetiredSlotReusedFirst`, then drop both edits and re-verify exit `0`.
 
 ## What the model leaves out
 
-- **Bounds**: 1 task / 2 slots (`single-task-retire-guards`), 2 tasks / 3 slots (`two-tasks-concurrent`), 1 `begin` cycle per actor and at most 1 `prepare_slot()` run in `Init` -> `Done`. Crash and fault toggles are configured per scenario (`AllowBaseError`, `AllowPrepareCrash`, `AllowRetireCrash`, `AllowSameTaskRace`, `AllowRetireClaimed`).
-- **Not modeled**: unbounded slot numbers beyond `{1, 2, 3}`, repeated begin/retire cycles beyond `MaxCycles = 1`, `begin` failing mid-checkout inside `git worktree add` (`commands.rs:133`), `branch`/`--target` mismatch rejection (`commands.rs:208-210`), `switch_slot` dirty error when dirty files appear mid-`begin`, Windows file-handle sharing delays (`store.rs:93`), and internal details of `wl finish` workers (modeled separately in `skills/verify-finish-integration/`).
+- **Bounds**: 1 task / 2 slots (`single-task-retire-guards`), 2 tasks / 3 slots (`two-tasks-concurrent` with `MaxCycles = 1`; `slot-reuse-order` with `MaxCycles = 2`), and at most 1 `prepare_slot()` run in `Init` -> `Done`. Crash and fault toggles are configured per scenario (`AllowBaseError`, `AllowPrepareCrash`, `AllowRetireCrash`, `AllowSameTaskRace`, `AllowRetireClaimed`).
+- **Not modeled**: unbounded slot numbers beyond `{1, 2, 3}`, repeated begin/retire cycles beyond `MaxCycles`, `begin` failing mid-checkout inside `git worktree add` (`commands.rs:142`), `branch`/`--target` mismatch rejection (`commands.rs:219-221`), `switch_slot` dirty error when dirty files appear mid-`begin`, Windows file-handle sharing delays (`store.rs:96`), and internal details of `wl finish` workers (modeled separately in `skills/verify-finish-integration/`).
 - A pass holds under these bounds and assumptions, not for arbitrary crash combinations when the finding toggles are disabled.

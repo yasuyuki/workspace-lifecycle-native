@@ -46,7 +46,7 @@ export const state = (v) => {
       if (Object.values(v.slotClaim || {}).includes(t)) return `${t.toUpperCase()}:claim済(task無)`;
       return `${t.toUpperCase()}:未開始`;
     }
-    if (v.rPc?.[t] === "checked") return `${t.toUpperCase()}:退役検証済(S${r.slot})`;
+    if (v.rPc?.[t] === "checked" || v.rPc?.[t] === "orderRead") return `${t.toUpperCase()}:退役検証済(S${r.slot})`;
     return `${t.toUpperCase()}:${r.stage}(S${r.slot})`;
   };
 
@@ -54,7 +54,7 @@ export const state = (v) => {
     const c = v.slotClaim["1"];
     const r = v.taskRec["a"];
     if (r.exists) {
-      if (v.rPc["a"] === "checked") return "退役処理中 (branch 削除済)";
+      if (v.rPc["a"] === "checked" || v.rPc["a"] === "orderRead") return "退役処理中 (branch 削除済)";
       if (r.stage === "ready") return "作業可能 (Ready)";
       if (v.bPc["a1"] === "checkoutReady") return "checkout 準備済";
       return "開始済 (Claimed)";
@@ -140,6 +140,8 @@ export const step = (action, from, to) => {
       return `${prefix}branch 切替と Ready 書込`;
     case "RetireCheckAndClean":
       return `${prefix}retire 安全性検査と clean`;
+    case "RetireReadOrder":
+      return null;
     case "RetireRemoveTask":
       return `${prefix}tasks/t.json 削除`;
     case "RetireRemoveClaim":

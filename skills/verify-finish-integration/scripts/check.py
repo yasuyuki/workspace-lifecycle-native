@@ -22,6 +22,7 @@ TLC_VERSION = "TLC2 Version 2.19 of 08 August 2024"
 EXPECTED = {
     "single-task-gated": None,
     "single-task-ungated": None,
+    "single-task-retire-reuse": None,
     "two-tasks-crash-queue": None,
     "two-tasks-accept-race": None,
     "two-tasks-suffix": None,
@@ -116,6 +117,30 @@ MUTANTS = [
         "ExclusiveIntegrationWorktree",
         "  /\\ IF TRUE \\* Mutant hook: push_target() acquires integration_lock",
         "  /\\ IF FALSE \\* Mutant hook: push_target() acquires integration_lock",
+    ),
+    (
+        "retire_task skips write_retired_run after removing task file",
+        "wl/src/commands.rs retire_task() write_retired_run()",
+        "single-task-retire-reuse",
+        "RetiredRunMatchesExecution",
+        "     IN /\\ IF TRUE \\* Mutant hook: write_retired_run records Stage::Retired on runs/<id>.json",
+        "     IN /\\ IF FALSE \\* Mutant hook: write_retired_run records Stage::Retired on runs/<id>.json",
+    ),
+    (
+        "finish keys runs by task name instead of unique FinishId",
+        "wl/src/finish.rs finish() create_run()",
+        "single-task-retire-reuse",
+        "RunIsolationAcrossRebegin",
+        "           IF TRUE \\* Mutant hook: allocate a fresh FinishId per finish instead of reusing task key",
+        "           IF FALSE \\* Mutant hook: allocate a fresh FinishId per finish instead of reusing task key",
+    ),
+    (
+        "housekeeping and begin skip finalizing crashed finish --retire",
+        "wl/src/finish.rs finalize_retired_finish_locked()",
+        "single-task-retire-reuse",
+        "RetiredRunMatchesExecution",
+        "  IF TRUE \\* Mutant hook: housekeeping/begin finalizes crashed finish --retire",
+        "  IF FALSE \\* Mutant hook: housekeeping/begin finalizes crashed finish --retire",
     ),
 ]
 

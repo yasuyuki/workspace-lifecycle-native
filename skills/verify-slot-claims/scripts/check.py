@@ -22,6 +22,7 @@ TLC_VERSION = "TLC2 Version 2.19 of 08 August 2024"
 EXPECTED = {
     "single-task-retire-guards": None,
     "two-tasks-concurrent": None,
+    "slot-reuse-order": None,
     "finding-begin-base-error": None,
     "finding-prepare-crash": None,
     "finding-retire-crash": None,
@@ -41,7 +42,7 @@ MUTANTS = [
     ),
     (
         "begin skips switch_slot branch checkout before writing Ready",
-        "wl/src/commands.rs begin() switch_slot() call (line 217)",
+        "wl/src/commands.rs begin() switch_slot() call (line 228)",
         "two-tasks-concurrent",
         "SlotBranchMatchesReadyTask",
         "        /\\ IF TRUE \\* Mutant hook: skip switch_slot before writing Ready",
@@ -57,11 +58,11 @@ MUTANTS = [
     ),
     (
         "retire_task removes claim before removing task record",
-        "wl/src/commands.rs retire_task() Store::remove order (lines 315-318)",
+        "wl/src/commands.rs retire_task() Store::remove order (lines 351-354)",
         "two-tasks-concurrent",
         "TaskSlotMatchesClaim",
-        "  /\\ IF TRUE \\* Mutant hook: swap order so claim is removed BEFORE task record",
-        "  /\\ IF FALSE \\* Mutant hook: swap order so claim is removed BEFORE task record",
+        "        /\\ IF TRUE \\* Mutant hook: swap order so claim is removed BEFORE task record",
+        "        /\\ IF FALSE \\* Mutant hook: swap order so claim is removed BEFORE task record",
     ),
     (
         "retire_task skips HoldRecord check",
@@ -97,15 +98,15 @@ MUTANTS = [
     ),
     (
         "begin() skips task_lock mutual exclusion across same-task begins",
-        "wl/src/commands.rs begin() lock_task(&task) (line 178)",
+        "wl/src/commands.rs begin() lock_task(&task) (line 188)",
         "finding-same-task-begin-race",
-        "AtMostOneClaimPerTask",
+        "TaskSlotMatchesClaim",
         "     IN /\\ IF TRUE \\* Mutant hook: begin() acquires task_lock before checking task record",
         "     IN /\\ IF FALSE \\* Mutant hook: begin() acquires task_lock before checking task record",
     ),
     (
         "retire_task() skips task_lock mutual exclusion mid-begin",
-        "wl/src/commands.rs retire_task() lock_task(task) (line 269)",
+        "wl/src/commands.rs retire_task() lock_task(task) (line 280)",
         "finding-begin-retire-race",
         "TaskSlotMatchesClaim",
         "  /\\ IF TRUE \\* Mutant hook: retire_task() acquires task_lock",
@@ -113,7 +114,7 @@ MUTANTS = [
     ),
     (
         "begin() claims slot before resolve_base()",
-        "wl/src/commands.rs begin() resolve_base before claim_slot (lines 183-185)",
+        "wl/src/commands.rs begin() resolve_base before claim_slot (lines 194-196)",
         "finding-begin-base-error",
         "NoOrphanClaimWhenIdle",
         "     IN IF TRUE \\* Mutant hook: resolve_base() fails BEFORE calling claim_slot()",
@@ -121,7 +122,7 @@ MUTANTS = [
     ),
     (
         "reclaim_orphan_claims() skips stale #prepare reclamation",
-        "wl/src/commands.rs reclaim_stale_prepare_claims_locked() (lines 60-62, 91-95)",
+        "wl/src/commands.rs reclaim_stale_prepare_claims_locked() (lines 61-63, 91-95)",
         "finding-prepare-crash",
         "NoOrphanClaimAfterHousekeeping",
         "         clearPrep == IF TRUE \\* Mutant hook: reclaim stale #prepare claims when prepare_lock is free",
@@ -129,11 +130,27 @@ MUTANTS = [
     ),
     (
         "reclaim_orphan_task_claims() skips try_lock_exclusive(task_lock)",
-        "wl/src/commands.rs reclaim_orphan_task_claims() (lines 74-78)",
+        "wl/src/commands.rs reclaim_orphan_task_claims() (lines 75-79)",
         "two-tasks-concurrent",
         "TaskSlotMatchesClaim",
         "  /\\ LET clearTask == IF TRUE \\* Mutant hook: check task_lock before reclaiming orphan task claim",
         "  /\\ LET clearTask == IF FALSE \\* Mutant hook: check task_lock before reclaiming orphan task claim",
+    ),
+    (
+        "claim_slot picks lowest slot number instead of earliest retirement_order",
+        "wl/src/commands.rs claim_slot() (order.is_none(), order, n) sort (lines 111-116)",
+        "slot-reuse-order",
+        "OldestRetiredSlotReusedFirst",
+        "                       THEN IF TRUE \\* Mutant hook: claim_slot() picks earliest retirement_order first",
+        "                       THEN IF FALSE \\* Mutant hook: claim_slot() picks earliest retirement_order first",
+    ),
+    (
+        "retire_task skips retirement_lock around retirement_order update",
+        "wl/src/commands.rs retire_task() Store::lock_exclusive(&retirement_lock) (line 337)",
+        "slot-reuse-order",
+        "UniqueRetirementOrder",
+        "  /\\ IF TRUE \\* Mutant hook: retire_task() acquires retirement_lock",
+        "  /\\ IF FALSE \\* Mutant hook: retire_task() acquires retirement_lock",
     ),
 ]
 

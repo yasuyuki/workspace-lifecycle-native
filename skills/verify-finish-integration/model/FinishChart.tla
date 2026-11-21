@@ -12,8 +12,12 @@ ChartInit ==
   /\ hold = [t \in Tasks |-> FALSE]
   /\ retired = [t \in Tasks |-> FALSE]
   /\ finPhase = [t \in Tasks |-> "idle"]
+  /\ retirePhase = [t \in Tasks |-> "idle"]
+  /\ rebeginCount = [t \in Tasks |-> 0]
   /\ accept = [t \in Tasks |-> NoAccept]
   /\ prog = [t \in Tasks |-> NoProg]
+  /\ runs = <<>>
+  /\ terminalRuns = {}
   /\ queue = {}
   /\ wtLock = None
   /\ wAlive = [t \in Tasks |-> FALSE]
@@ -44,24 +48,26 @@ ChartCiTopicSucceeds ==
     /\ ciTopic[c] = "pending"
     /\ wPc["a"] = "checkTopicCI"
     /\ ciTopic' = [ciTopic EXCEPT ![c] = "success"]
-    /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-                 queue, wtLock, wAlive, wPc, wStage, wBase, wMerged,
-                 wFailReason, inWorktree, wtSrc, wtMergedValid, validatedOwn,
-                 validT, conflictC, preflightBad, ciTarget, tRemoteTip,
-                 tRemoteCommits, integratedInfo, retiredSnap, pushedWhileHeld,
-                 badQueueRemove, extPushed>>
+    /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, retirePhase,
+                 rebeginCount, accept, prog, runs, terminalRuns, queue, wtLock,
+                 wAlive, wPc, wStage, wBase, wMerged, wFailReason, inWorktree,
+                 wtSrc, wtMergedValid, validatedOwn, validT, conflictC,
+                 preflightBad, ciTarget, tRemoteTip, tRemoteCommits,
+                 integratedInfo, retiredSnap, pushedWhileHeld, badQueueRemove,
+                 extPushed>>
 
 ChartCiTargetSucceeds ==
   \E m \in TargetCommits :
     /\ ciTarget[m] = "pending"
     /\ wPc["a"] = "waitTargetCI"
     /\ ciTarget' = [ciTarget EXCEPT ![m] = "success"]
-    /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-                 queue, wtLock, wAlive, wPc, wStage, wBase, wMerged,
-                 wFailReason, inWorktree, wtSrc, wtMergedValid, validatedOwn,
-                 validT, conflictC, preflightBad, ciTopic, tRemoteTip,
-                 tRemoteCommits, integratedInfo, retiredSnap, pushedWhileHeld,
-                 badQueueRemove, extPushed>>
+    /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, retirePhase,
+                 rebeginCount, accept, prog, runs, terminalRuns, queue, wtLock,
+                 wAlive, wPc, wStage, wBase, wMerged, wFailReason, inWorktree,
+                 wtSrc, wtMergedValid, validatedOwn, validT, conflictC,
+                 preflightBad, ciTopic, tRemoteTip, tRemoteCommits,
+                 integratedInfo, retiredSnap, pushedWhileHeld, badQueueRemove,
+                 extPushed>>
 
 ChartExternalPush ==
   /\ wPc["a"] = "checkTopicCI"
@@ -72,8 +78,12 @@ ChartUserCommitFix ==
   /\ ~Running("a")
   /\ UserCommitFix("a")
 
+ChartFinish ==
+  /\ FinishWriteAccept("a")
+  /\ (head["a"] = 1 => ~accept'["a"].retire)
+
 ChartNext ==
-  \/ FinishWriteAccept("a")
+  \/ ChartFinish
   \/ WorkerStart("a")
   \/ WorkerPushTopic("a")
   \/ WorkerWaitTurn("a")
@@ -84,7 +94,9 @@ ChartNext ==
   \/ WorkerPushAcquire("a")
   \/ WorkerPushTarget("a")
   \/ WorkerTargetChecks("a")
-  \/ WorkerRetire("a")
+  \/ WorkerRetireRemoveTask("a")
+  \/ WorkerRetireWriteRun("a")
+  \/ WorkerRetireCleanup("a")
   \/ WorkerWriteStage("a")
   \/ WorkerLeaveQueue("a")
   \/ ChartUserCommitFix

@@ -15,49 +15,51 @@ license: MIT
 - `NoUnpublishedOrDirtyRetire`: `finish --retire` never retires a task that has uncommitted/untracked files, an active `HoldRecord`, post-accept commits, or commits missing from `origin/<target>`.
 - `NoTargetPushWhileHeld`: no task pushes to `origin/<target>` while it has an active `HoldRecord`.
 - `QueueEntryMatchesOwner`: a task worker's `leave_queue()` never removes another running task's entry from `queue/<target>/`.
+- `RetiredRunMatchesExecution`: once `finish --retire` completes retirement (even after crashing post-task-deletion once `housekeeping()` / `begin()` / `retire()` runs `finalize_retired_finish_locked()`), its durable `runs/<id>.json` records `stage: "retired"` matching that exact run's commit and target, and no live `accept.json` / `progress.json` remains to taint later runs.
+- `RunIsolationAcrossRebegin`: retiring `task` and re-beginning the same task name preserves every prior terminal `runs/<id>.json` (`retired` / `needs-action`) keyed by `FinishId` without altering or misattributing earlier executions.
 
-**Harm when they break.** Two workers overwrite each other's `integrate-<target>` checkout mid-validation so unchecked code lands on `main`, a running task's queue entry is deleted early, unverified commits reach `main`, held tasks integrate, or dirty/unpushed user work is erased during retirement.
+**Harm when they break.** Two workers overwrite each other's `integrate-<target>` checkout mid-validation so unchecked code lands on `main`, a running task's queue entry is deleted early, unverified commits reach `main`, held tasks integrate, dirty/unpushed user work is erased during retirement, callers monitoring `finish --retire` lose its outcome or mistake an unrelated or failed execution for a retired run, or leftover finish files corrupt a later same-named task.
 
-## Current status at `dce9d18489a94fad25344283e2e77505ce430112`
+## Current status at `0149b853f6f8611cb12b4f06cb83215fbc8e45d7`
 
-All five configurations (`single-task-gated`, `single-task-ungated`, `two-tasks-crash-queue`, `two-tasks-accept-race`, `two-tasks-suffix`) pass all seven invariants (`EXPECTED` is `None` for every config). The three previously open two-task findings were resolved in commit `49d2d43` (included in `dce9d18`):
-
-1. `two-tasks-suffix` -> `queue_entry_task()` (`wl/src/finish.rs:110-112`) parses `<ts>-<task>` via `split_once('-')` instead of `ends_with()`, so `wait_for_turn()` and `leave_queue()` match only exact owners.
-2. `two-tasks-accept-race` -> `prepare()` (`finish.rs:356`) and `push_target()` (`finish.rs:444`) acquire the per-target exclusive OS lock `Store::lock_exclusive(&integration_lock(target))` (`wl/src/store.rs:29, 136`), preventing concurrent entry into `integrate-<target>` even when an older `accept.json` creates its queue file late.
-3. `two-tasks-crash-queue` -> `Worker::work()` (`finish.rs:197-203`) writes `Stage::TargetPushed` / `Stage::NeedsAction` via `Store::write_durable()` before calling `worker.leave_queue()`, `wait_for_turn()` checks `needs_queue()` (`finish.rs:115-122`), unguarded `merge --abort` was removed from `withdraw()`, and `integration_lock` serializes `prepare()` / `push_target()` across restarts.
+All six configurations (`single-task-gated`, `single-task-ungated`, `single-task-retire-reuse`, `two-tasks-crash-queue`, `two-tasks-accept-race`, `two-tasks-suffix`) pass all nine invariants (`EXPECTED` is `None` for every config). In addition to the earlier two-task findings (`49d2d43`), commit `0149b85` preserves per-run `runs/<id>.json` outcomes keyed by `FinishId` (`wl/src/finish.rs:281-310`), writes `Stage::Retired` via `write_retired_run()` after `retire_task()` deletes `tasks/<task>.json` (`wl/src/commands.rs:356-359`), and finalizes crashed `finish --retire` executions via `finalize_retired_finish_locked()` (`wl/src/finish.rs:155-171`) in `housekeeping()`, `begin()`, and absent-task `retire_task()`.
 
 ## When to use
 
-Run this check when a change touches covered code in `wl/src/finish.rs`, `wl/src/store.rs`, or `wl/src/commands.rs`. To see what changed since the model was last confirmed:
+Run this check when a change touches covered code in `wl/src/finish.rs`, `wl/src/store.rs`, `wl/src/model.rs` (`FinishId` / `FinishRun`), or `wl/src/commands.rs`. To see what changed since the model was last confirmed:
 
 ```sh
 sync=$(git log -1 --format=%H -- skills/verify-finish-integration)
-git diff "$sync" -- wl/src/finish.rs wl/src/store.rs wl/src/commands.rs
+git diff "$sync" -- wl/src/finish.rs wl/src/store.rs wl/src/model.rs wl/src/commands.rs
 ```
 
-Empty output (or changes only inside `begin`, `status`, `hold`, `release_hold`, `prepare_slot`, or `reclaim_*` outside `retire_task` and `Store::*lock*`) means the model still describes the covered functions.
+Empty output (or changes only inside `hold`, `release_hold`, `prepare_slot`, or `reclaim_*` outside `begin`, `retire_task`, `Store::*lock*`, and `FinishRun` / `runs/`) means the model still describes the covered functions.
 
 ## Coverage
 
-Sync commit: `dce9d18489a94fad25344283e2e77505ce430112` (verified against `49d2d43` and `dce9d18`).
+Sync commit: `0149b853f6f8611cb12b4f06cb83215fbc8e45d7` (verified after commit `0149b85`).
 
-| Code at `dce9d18` (`wl/src/finish.rs` unless named) | Model action |
+| Code at `0149b85` (`wl/src/finish.rs` unless named) | Model action |
 | --- | --- |
-| `finish()` validation checks + `Store::write_json` of `accept.json` (lines 24-79) | `FinishWriteAccept` |
-| `finish()` `Store::create_new` of `queue/<target>/<ts>-<task>` (line 80) | `FinishEnqueue` (split when `PreemptAccept`) |
-| `housekeeping()` restart + `work()` `try_lock_exclusive` & progress load (lines 134-139, 167-187) | `WorkerStart` |
-| `Worker::step()` `Stage::Accepted` -> `push_topic()` (lines 227-234, 282-287) | `WorkerPushTopic` |
-| `wait_for_turn()`, `queue_entry_task()`, `needs_queue()` (lines 110-122, 299-320) | `WorkerWaitTurn` |
-| `prepare()` `lock_integration()` (`store.rs:29, 136`) | `WorkerPrepareAcquire` |
-| `prepare()` fetch, ancestor short-circuit, fast-forward/merge in `integrate-<target>` (lines 357-381) | `WorkerPrepareMerge` |
-| `prepare()` `.lifecycle.toml` validation run under lock (lines 382-403) | `WorkerPrepareValidate` |
-| `push_target()` topic `wait_for_checks(commit)` (lines 437-440) | `WorkerCheckTopicCI` |
-| `push_target()` `lock_integration()` (line 444) | `WorkerPushAcquire` |
-| `push_target()` `HoldRecord`, fetch, remote tip compare, `preflight`, push (lines 441-464) | `WorkerPushTarget` |
-| `Worker::step()` `Stage::TargetPushed` -> `leave_queue()` & `wait_for_checks(merged)` (lines 245-252) | `WorkerTargetChecks` |
-| `Worker::step()` `Stage::Integrated` -> `commands.rs` `retire_task()` (lines 253-256; `commands.rs:268-321`) | `WorkerRetire` |
-| `work()` `Store::write_durable(&progress_path, &progress)` (lines 197-199) | `WorkerWriteStage` |
-| `work()` post-durable `worker.leave_queue()` (lines 201-203, 322-328) | `WorkerLeaveQueue` |
+| `finish()` validation checks, `create_run()` (`runs/<id>.json`), `Store::write_json` of `accept.json` (lines 24-89, 104-121) | `FinishWriteAccept` |
+| `finish()` `Store::create_new` of `queue/<target>/<ts>-<task>` (line 90) | `FinishEnqueue` (split when `PreemptAccept`) |
+| `housekeeping()` restart + `work()` `try_lock_exclusive` & progress load (lines 213-225, 313-333) | `WorkerStart` |
+| `Worker::step()` `Stage::Accepted` -> `push_topic()` (lines 374-380, 429-434) | `WorkerPushTopic` |
+| `wait_for_turn()`, `queue_entry_task()`, `needs_queue()` (lines 191-203, 446-467) | `WorkerWaitTurn` |
+| `prepare()` `lock_integration()` (line 503; `store.rs:32, 139`) | `WorkerPrepareAcquire` |
+| `prepare()` fetch, ancestor short-circuit, fast-forward/merge in `integrate-<target>` (lines 504-526) | `WorkerPrepareMerge` |
+| `prepare()` `.lifecycle.toml` validation run under lock (lines 529-548) | `WorkerPrepareValidate` |
+| `push_target()` topic `wait_for_checks(commit)` (line 587) | `WorkerCheckTopicCI` |
+| `push_target()` `lock_integration()` (line 591) | `WorkerPushAcquire` |
+| `push_target()` `HoldRecord`, fetch, remote tip compare, `preflight`, push (lines 588-610) | `WorkerPushTarget` |
+| `Worker::step()` `Stage::TargetPushed` -> `leave_queue()` & `wait_for_checks(merged)` (lines 392-399) | `WorkerTargetChecks` |
+| `Worker::step()` `Stage::Integrated` -> `commands.rs` `retire_task()` safety checks & task delete (lines 400-403; `commands.rs:279-355`) | `WorkerRetireRemoveTask` |
+| `retire_task()` post-delete `write_retired_run()` (`commands.rs:356-357`; `finish.rs:128-146`) | `WorkerRetireWriteRun` |
+| `retire_task()` `clear_finish_files()` (`commands.rs:358`; `finish.rs:148-153`) | `WorkerRetireCleanup` |
+| `housekeeping()` / `begin()` / absent `retire_task()` -> `finalize_retired_finish_locked()` (`finish.rs:155-171, 217-221`; `commands.rs:188-190, 287-290`) | `HousekeepingFinalizeRetire` |
+| `commands.rs` `begin()` re-creating a retired task (`commands.rs:170-237`) | `UserRebegin` |
+| `work()` `write_run()` & `Store::write_durable(&progress_path, &progress)` (lines 341-346) | `WorkerWriteStage` |
+| `work()` post-durable `worker.leave_queue()` (lines 348-350, 469-475) | `WorkerLeaveQueue` |
 | Worker process termination (`worker_lock` & `integration_lock` drop, disk files stay) | `WorkerKill` |
 
 ## Run
@@ -82,10 +84,10 @@ If a run disagrees with `EXPECTED`:
 2. **Intentional contract change**: confirm against code and tests, update `EXPECTED`, the Coverage table, and the status note above, and advance the sync note only after re-running `--mutants`.
 3. **Mutant no longer caught**: either the guard/lock in `wl/src/` regressed or `MUTANTS` text in `scripts/check.py` drifted out of sync with `FinishIntegration.tla`.
 
-To confirm the check catches a real code change on a scratch copy, remove `self.lock_integration()?` in `wl/src/finish.rs` (`prepare()` line 356), apply the matching edit in `model/FinishIntegration.tla` (`WorkerPrepareAcquire` `IF TRUE` -> `IF FALSE`), run `scripts/check.py` and observe `match: false` on `two-tasks-accept-race` (`ExclusiveIntegrationWorktree`), then drop both edits and re-verify exit `0`.
+To confirm the check catches a real code change on a scratch copy, remove `self.lock_integration()?` in `wl/src/finish.rs` (`prepare()` line 503) and flip `WorkerPrepareAcquire` (`IF TRUE` -> `IF FALSE`) in `model/FinishIntegration.tla` to see `two-tasks-accept-race` fail `ExclusiveIntegrationWorktree`, or skip `write_retired_run` (`commands.rs:357`) and flip `WorkerRetireWriteRun` (`IF TRUE` -> `IF FALSE`) to see `single-task-retire-reuse` fail `RetiredRunMatchesExecution`, then drop the edits and re-verify exit `0`.
 
 ## What the model leaves out
 
-- **Bounds**: 1 task with up to 1 fix commit, 3 finish attempts, and 1 external push (`single-task-*`); 2 tasks with 1 commit and 1 finish attempt (`two-tasks-*`).
-- **Not modeled**: explicit `wl retire`, `--target` selection (one shared target branch is modeled), `--base`, WSL offload transport details (`tar -m` / `wl-offload`), `gh auth token` / HTTP polling retries, `wl hold` arriving concurrently *between* `push_target`'s `HoldRecord` check (`finish.rs:441`) and `git push` (`finish.rs:460`), `reset_integration_worktree` failures on ignored data, Windows toast notifications, and `notices/` removal races (`finish.rs:140-149`).
+- **Bounds**: 1 task with up to 1 fix commit, 3 finish attempts, and 1 external push (`single-task-gated` / `single-task-ungated`), 1 task with up to 1 re-begin after retirement (`single-task-retire-reuse`); 2 tasks with 1 commit and 1 finish attempt (`two-tasks-*`).
+- **Not modeled**: explicit `wl retire`, `--target` selection (one shared target branch is modeled), `--base`, WSL offload transport details (`tar -m` / `wl-offload`), `gh auth token` / HTTP polling retries, `wl hold` arriving concurrently *between* `push_target`'s `HoldRecord` check (`finish.rs:588`) and `git push` (`finish.rs:607`), `reset_integration_worktree` failures on ignored data, Windows toast notifications, and `notices/` removal races (`finish.rs:226-234`).
 - A pass holds under these stated bounds and assumptions, not for unmodeled multi-target or OS-filesystem edge cases.

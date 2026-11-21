@@ -1,6 +1,6 @@
 ---------------------------- MODULE FinishIntegration ----------------------------
 (* Formal model of wl/src/finish.rs, Store lock helpers in wl/src/store.rs,
-   and retire_task() in wl/src/commands.rs at commit dce9d18489a94fad25344283e2e77505ce430112.
+   and retire_task() in wl/src/commands.rs at commit 0149b853f6f8611cb12b4f06cb83215fbc8e45d7.
    Each action represents one indivisible saved state change, lock step,
    Git operation, or remote CI event. *)
 EXTENDS Naturals, FiniteSets, Sequences
@@ -14,6 +14,7 @@ CONSTANTS
   RetireMode,       \* TRUE when finish may run with --retire and user edits/holds may race
   MaxEdits,         \* 1 for single-task edit/fix tests, 0 for 2-task concurrency checks
   MaxAttempts,      \* bound on finish attempts per task
+  MaxRebegins,      \* bound on re-begins of the same task name after retirement
   AllowExternal     \* TRUE when an external push may advance origin/<target> once
 
 None == "none"
@@ -29,8 +30,12 @@ VARIABLES
   hold,             \* hold[t]: holds/<t>.json exists
   retired,          \* retired[t]: tasks/<t>.json has been deleted by retire_task
   finPhase,         \* "idle" | "queuing" (PreemptAccept only)
-  accept,           \* accept[t]: record [exists, attempt, commit, ts, retire]
+  retirePhase,      \* retirePhase[t]: "idle" | "taskDeleted" | "runWritten"
+  rebeginCount,     \* rebeginCount[t]: number of times task t was re-begun after retirement
+  accept,           \* accept[t]: record [exists, runId, attempt, commit, ts, retire]
   prog,             \* prog[t]: persisted progress.json [attempt, stage, baseObj, mergedObj]
+  runs,             \* sequence of wl/runs/<id>.json records indexed by unique FinishId
+  terminalRuns,     \* ghost snapshots of runs once they enter "retired" or "needs-action"
   queue,            \* set of [ts |-> Nat, task |-> Tasks]
   wtLock,           \* "none" | t: OS lock wl/queue/<target>.lock (finish.rs lock_integration)
   wAlive,           \* wAlive[t]: worker process holds workers/<t>.lock
@@ -56,7 +61,8 @@ VARIABLES
   badQueueRemove,   \* TRUE if leave_queue deleted another active task's queue entry
   extPushed         \* TRUE once ExternalTargetPush has fired
 
-vars == <<nextTs, head, dirty, hold, retired, finPhase, accept, prog, queue,
+vars == <<nextTs, head, dirty, hold, retired, finPhase, retirePhase, rebeginCount,
+          accept, prog, runs, terminalRuns, queue,
           wtLock, wAlive, wPc, wStage, wBase, wMerged, wFailReason, inWorktree,
           wtSrc, wtMergedValid, validatedOwn, validT, conflictC, preflightBad,
           ciTopic, ciTarget, tRemoteTip, tRemoteCommits, integratedInfo,
@@ -64,7 +70,7 @@ vars == <<nextTs, head, dirty, hold, retired, finPhase, accept, prog, queue,
 
 BaseObj == [kind |-> "base", src |-> None, base |-> None]
 ExtObj == [kind |-> "ext", src |-> "ext", base |-> None]
-NoAccept == [exists |-> FALSE, attempt |-> 0, commit |-> None, ts |-> 0, retire |-> FALSE]
+NoAccept == [exists |-> FALSE, runId |-> 0, attempt |-> 0, commit |-> None, ts |-> 0, retire |-> FALSE]
 NoProg == [attempt |-> 0, stage |-> "none", baseObj |-> BaseObj, mergedObj |-> BaseObj]
 
 \* queue_entry_task() matches exact task after timestamp '-' (finish.rs:110-112).
@@ -92,11 +98,17 @@ NeedsQueue(t) ==
 MinQueueEntry(q) ==
   CHOOSE e \in q : \A o \in q : e.ts <= o.ts
 
+FinalizeCrashedRetire ==
+  IF TRUE \* Mutant hook: housekeeping/begin finalizes crashed finish --retire
+  THEN TRUE
+  ELSE FALSE
+
 Published(c) == c \in tRemoteCommits
 
 AllDone ==
   \A t \in Tasks :
     /\ finPhase[t] = "idle"
+    /\ retirePhase[t] = "idle"
     /\ ~wAlive[t]
     /\ wtLock = None
     /\ (retired[t] \/ (accept[t].exists /\ prog[t].attempt = accept[t].attempt
@@ -109,8 +121,12 @@ Init ==
   /\ hold = [t \in Tasks |-> FALSE]
   /\ retired = [t \in Tasks |-> FALSE]
   /\ finPhase = [t \in Tasks |-> "idle"]
+  /\ retirePhase = [t \in Tasks |-> "idle"]
+  /\ rebeginCount = [t \in Tasks |-> 0]
   /\ accept = [t \in Tasks |-> NoAccept]
   /\ prog = [t \in Tasks |-> NoProg]
+  /\ runs = <<>>
+  /\ terminalRuns = {}
   /\ queue = {}
   /\ wtLock = None
   /\ wAlive = [t \in Tasks |-> FALSE]
@@ -136,7 +152,7 @@ Init ==
   /\ badQueueRemove = FALSE
   /\ extPushed = FALSE
 
-(* --- Foreground finish acceptance: wl/src/finish.rs lines 24-90 --- *)
+(* --- Foreground finish acceptance: wl/src/finish.rs lines 24-121 --- *)
 
 FinishWriteAccept(t) ==
   /\ ~retired[t]
@@ -146,38 +162,58 @@ FinishWriteAccept(t) ==
   /\ accept[t].attempt < MaxAttempts
   /\ LET cur == CommitId(t, head[t])
          retOptions == IF RetireMode THEN BOOLEAN ELSE {FALSE}
+         existingTaskRuns == { i \in DOMAIN runs : runs[i].task = t }
+         newRid ==
+           IF TRUE \* Mutant hook: allocate a fresh FinishId per finish instead of reusing task key
+           THEN Len(runs) + 1
+           ELSE IF existingTaskRuns # {} THEN CHOOSE i \in existingTaskRuns : TRUE ELSE Len(runs) + 1
+         freshRun == [id |-> newRid,
+                      task |-> t,
+                      attempt |-> accept[t].attempt + 1,
+                      commit |-> cur,
+                      retire |-> FALSE,
+                      stage |-> "accepted",
+                      published |-> FALSE,
+                      clean |-> TRUE,
+                      notHeld |-> TRUE]
      IN \E ret \in retOptions :
           /\ ~(accept[t].exists /\ prog[t].attempt = accept[t].attempt
                /\ prog[t].stage = "integrated" /\ accept[t].commit = cur /\ ~ret)
           /\ accept' = [accept EXCEPT ![t] = [exists |-> TRUE,
+                                              runId |-> newRid,
                                               attempt |-> accept[t].attempt + 1,
                                               commit |-> cur,
                                               ts |-> nextTs,
                                               retire |-> ret]]
+          /\ runs' = IF newRid > Len(runs)
+                     THEN Append(runs, [freshRun EXCEPT !.retire = ret])
+                     ELSE [runs EXCEPT ![newRid] = [freshRun EXCEPT !.retire = ret]]
           /\ nextTs' = nextTs + 1
           /\ IF PreemptAccept
              THEN /\ finPhase' = [finPhase EXCEPT ![t] = "queuing"]
                   /\ UNCHANGED queue
              ELSE /\ queue' = queue \cup {[ts |-> nextTs, task |-> t]}
                   /\ UNCHANGED finPhase
-  /\ UNCHANGED <<head, dirty, hold, retired, prog, wtLock, wAlive, wPc, wStage,
-               wBase, wMerged, wFailReason, inWorktree, wtSrc, wtMergedValid,
-               validatedOwn, validT, conflictC, preflightBad, ciTopic, ciTarget,
-               tRemoteTip, tRemoteCommits, integratedInfo, retiredSnap,
-               pushedWhileHeld, badQueueRemove, extPushed>>
+  /\ UNCHANGED <<head, dirty, hold, retired, retirePhase, rebeginCount, prog,
+               terminalRuns, wtLock, wAlive, wPc, wStage, wBase, wMerged,
+               wFailReason, inWorktree, wtSrc, wtMergedValid, validatedOwn,
+               validT, conflictC, preflightBad, ciTopic, ciTarget, tRemoteTip,
+               tRemoteCommits, integratedInfo, retiredSnap, pushedWhileHeld,
+               badQueueRemove, extPushed>>
 
 FinishEnqueue(t) ==
   /\ PreemptAccept
   /\ finPhase[t] = "queuing"
   /\ finPhase' = [finPhase EXCEPT ![t] = "idle"]
   /\ queue' = queue \cup {[ts |-> accept[t].ts, task |-> t]}
-  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, accept, prog, wtLock, wAlive,
-               wPc, wStage, wBase, wMerged, wFailReason, inWorktree, wtSrc,
-               wtMergedValid, validatedOwn, validT, conflictC, preflightBad,
-               ciTopic, ciTarget, tRemoteTip, tRemoteCommits, integratedInfo,
-               retiredSnap, pushedWhileHeld, badQueueRemove, extPushed>>
+  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, retirePhase, rebeginCount,
+               accept, prog, runs, terminalRuns, wtLock, wAlive, wPc, wStage,
+               wBase, wMerged, wFailReason, inWorktree, wtSrc, wtMergedValid,
+               validatedOwn, validT, conflictC, preflightBad, ciTopic, ciTarget,
+               tRemoteTip, tRemoteCommits, integratedInfo, retiredSnap,
+               pushedWhileHeld, badQueueRemove, extPushed>>
 
-(* --- Worker launch / housekeeping restart: finish.rs:132-139, 167-187 --- *)
+(* --- Worker launch / housekeeping restart: finish.rs:213-225, 313-334 --- *)
 
 WorkerStart(t) ==
   /\ ~retired[t]
@@ -197,11 +233,12 @@ WorkerStart(t) ==
                [] st = "target-pushed" -> "waitTargetCI"
                [] st = "integrated" -> "doRetire"
                [] OTHER -> "idle"]
-  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-               queue, wtLock, wFailReason, inWorktree, wtSrc, wtMergedValid,
-               validatedOwn, validT, conflictC, preflightBad, ciTopic, ciTarget,
-               tRemoteTip, tRemoteCommits, integratedInfo, retiredSnap,
-               pushedWhileHeld, badQueueRemove, extPushed>>
+  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, retirePhase,
+               rebeginCount, accept, prog, runs, terminalRuns, queue, wtLock,
+               wFailReason, inWorktree, wtSrc, wtMergedValid, validatedOwn,
+               validT, conflictC, preflightBad, ciTopic, ciTarget, tRemoteTip,
+               tRemoteCommits, integratedInfo, retiredSnap, pushedWhileHeld,
+               badQueueRemove, extPushed>>
 
 (* --- Stage::Accepted -> TopicPushed: finish.rs:227-234, 282-287 --- *)
 
@@ -218,10 +255,11 @@ WorkerPushTopic(t) ==
              /\ wStage' = [wStage EXCEPT ![t] = "topic-pushed"]
              /\ wPc' = [wPc EXCEPT ![t] = "writeStage"]
              /\ UNCHANGED wFailReason
-  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-               queue, wtLock, wAlive, wBase, wMerged, inWorktree, wtSrc,
-               wtMergedValid, validatedOwn, validT, conflictC, preflightBad,
-               ciTarget, tRemoteTip, tRemoteCommits, integratedInfo, retiredSnap,
+  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, retirePhase,
+               rebeginCount, accept, prog, runs, terminalRuns, queue, wtLock,
+               wAlive, wBase, wMerged, inWorktree, wtSrc, wtMergedValid,
+               validatedOwn, validT, conflictC, preflightBad, ciTarget,
+               tRemoteTip, tRemoteCommits, integratedInfo, retiredSnap,
                pushedWhileHeld, badQueueRemove, extPushed>>
 
 (* --- wait_for_turn(): finish.rs:299-320 --- *)
@@ -239,12 +277,12 @@ WorkerWaitTurn(t) ==
                THEN /\ queue' = queue \ {first}
                     /\ UNCHANGED wPc
                ELSE UNCHANGED <<queue, wPc>>
-  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-               wtLock, wAlive, wStage, wBase, wMerged, wFailReason, inWorktree,
-               wtSrc, wtMergedValid, validatedOwn, validT, conflictC,
-               preflightBad, ciTopic, ciTarget, tRemoteTip, tRemoteCommits,
-               integratedInfo, retiredSnap, pushedWhileHeld, badQueueRemove,
-               extPushed>>
+  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, retirePhase,
+               rebeginCount, accept, prog, runs, terminalRuns, wtLock, wAlive,
+               wStage, wBase, wMerged, wFailReason, inWorktree, wtSrc,
+               wtMergedValid, validatedOwn, validT, conflictC, preflightBad,
+               ciTopic, ciTarget, tRemoteTip, tRemoteCommits, integratedInfo,
+               retiredSnap, pushedWhileHeld, badQueueRemove, extPushed>>
 
 (* --- prepare() lock acquisition: finish.rs:293-295, 356 --- *)
 
@@ -256,11 +294,12 @@ WorkerPrepareAcquire(t) ==
   /\ wtLock' = t
   /\ inWorktree' = inWorktree \cup {t}
   /\ wPc' = [wPc EXCEPT ![t] = "prepMerge"]
-  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-               queue, wAlive, wStage, wBase, wMerged, wFailReason, wtSrc,
-               wtMergedValid, validatedOwn, validT, conflictC, preflightBad,
-               ciTopic, ciTarget, tRemoteTip, tRemoteCommits, integratedInfo,
-               retiredSnap, pushedWhileHeld, badQueueRemove, extPushed>>
+  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, retirePhase,
+               rebeginCount, accept, prog, runs, terminalRuns, queue, wAlive,
+               wStage, wBase, wMerged, wFailReason, wtSrc, wtMergedValid,
+               validatedOwn, validT, conflictC, preflightBad, ciTopic, ciTarget,
+               tRemoteTip, tRemoteCommits, integratedInfo, retiredSnap,
+               pushedWhileHeld, badQueueRemove, extPushed>>
 
 (* --- prepare() lines 357-381: fetch target, fast-forward or merge in integrate-<target> --- *)
 
@@ -293,10 +332,11 @@ WorkerPrepareMerge(t) ==
                 /\ wtMergedValid' = validT[c]
                 /\ wPc' = [wPc EXCEPT ![t] = "prepValidate"]
                 /\ UNCHANGED <<wtLock, wStage, wFailReason, inWorktree>>
-  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-               queue, wAlive, validatedOwn, validT, conflictC, preflightBad,
-               ciTopic, ciTarget, tRemoteTip, tRemoteCommits, integratedInfo,
-               retiredSnap, pushedWhileHeld, badQueueRemove, extPushed>>
+  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, retirePhase,
+               rebeginCount, accept, prog, runs, terminalRuns, queue, wAlive,
+               validatedOwn, validT, conflictC, preflightBad, ciTopic, ciTarget,
+               tRemoteTip, tRemoteCommits, integratedInfo, retiredSnap,
+               pushedWhileHeld, badQueueRemove, extPushed>>
 
 (* --- prepare() lines 382-402: validation runs under _integration_lock --- *)
 
@@ -318,11 +358,12 @@ WorkerPrepareValidate(t) ==
              /\ wtLock' = IF wtLock = t THEN None ELSE wtLock
              /\ inWorktree' = inWorktree \ {t}
              /\ UNCHANGED validatedOwn
-  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-               queue, wAlive, wBase, wMerged, wtSrc, wtMergedValid, validT,
-               conflictC, preflightBad, ciTopic, ciTarget, tRemoteTip,
-               tRemoteCommits, integratedInfo, retiredSnap, pushedWhileHeld,
-               badQueueRemove, extPushed>>
+  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, retirePhase,
+               rebeginCount, accept, prog, runs, terminalRuns, queue, wAlive,
+               wBase, wMerged, wtSrc, wtMergedValid, validT, conflictC,
+               preflightBad, ciTopic, ciTarget, tRemoteTip, tRemoteCommits,
+               integratedInfo, retiredSnap, pushedWhileHeld, badQueueRemove,
+               extPushed>>
 
 (* --- push_target() lines 437-440: wait_for_checks(commit) before lock --- *)
 
@@ -340,11 +381,12 @@ WorkerCheckTopicCI(t) ==
                [] OTHER -> UNCHANGED <<wPc, wStage, wFailReason>>
         ELSE /\ wPc' = [wPc EXCEPT ![t] = "acquirePushLock"]
              /\ UNCHANGED <<wStage, wFailReason>>
-  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-               queue, wtLock, wAlive, wBase, wMerged, inWorktree, wtSrc,
-               wtMergedValid, validatedOwn, validT, conflictC, preflightBad,
-               ciTopic, ciTarget, tRemoteTip, tRemoteCommits, integratedInfo,
-               retiredSnap, pushedWhileHeld, badQueueRemove, extPushed>>
+  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, retirePhase,
+               rebeginCount, accept, prog, runs, terminalRuns, queue, wtLock,
+               wAlive, wBase, wMerged, inWorktree, wtSrc, wtMergedValid,
+               validatedOwn, validT, conflictC, preflightBad, ciTopic, ciTarget,
+               tRemoteTip, tRemoteCommits, integratedInfo, retiredSnap,
+               pushedWhileHeld, badQueueRemove, extPushed>>
 
 (* --- push_target() line 444: acquire integration_lock --- *)
 
@@ -356,11 +398,12 @@ WorkerPushAcquire(t) ==
   /\ wtLock' = t
   /\ inWorktree' = inWorktree \cup {t}
   /\ wPc' = [wPc EXCEPT ![t] = "pushTargetExec"]
-  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-               queue, wAlive, wStage, wBase, wMerged, wFailReason, wtSrc,
-               wtMergedValid, validatedOwn, validT, conflictC, preflightBad,
-               ciTopic, ciTarget, tRemoteTip, tRemoteCommits, integratedInfo,
-               retiredSnap, pushedWhileHeld, badQueueRemove, extPushed>>
+  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, retirePhase,
+               rebeginCount, accept, prog, runs, terminalRuns, queue, wAlive,
+               wStage, wBase, wMerged, wFailReason, wtSrc, wtMergedValid,
+               validatedOwn, validT, conflictC, preflightBad, ciTopic, ciTarget,
+               tRemoteTip, tRemoteCommits, integratedInfo, retiredSnap,
+               pushedWhileHeld, badQueueRemove, extPushed>>
 
 (* --- push_target() lines 441-464: hold check, fetch, push target; queue kept until write_durable --- *)
 
@@ -408,12 +451,13 @@ WorkerPushTarget(t) ==
              /\ wtLock' = IF wtLock = t THEN None ELSE wtLock
              /\ inWorktree' = inWorktree \ {t}
              /\ UNCHANGED wFailReason
-  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-               queue, wAlive, wBase, wMerged, wtSrc, wtMergedValid,
-               validatedOwn, validT, conflictC, preflightBad, ciTopic,
-               integratedInfo, retiredSnap, badQueueRemove, extPushed>>
+  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, retirePhase,
+               rebeginCount, accept, prog, runs, terminalRuns, queue, wAlive,
+               wBase, wMerged, wtSrc, wtMergedValid, validatedOwn, validT,
+               conflictC, preflightBad, ciTopic, integratedInfo, retiredSnap,
+               badQueueRemove, extPushed>>
 
-(* --- Stage::TargetPushed lines 245-252: idempotent leave_queue + wait_for_checks(merged) --- *)
+(* --- Stage::TargetPushed lines 392-399: idempotent leave_queue + wait_for_checks(merged) --- *)
 
 WorkerTargetChecks(t) ==
   /\ wAlive[t] /\ wPc[t] = "waitTargetCI"
@@ -430,16 +474,18 @@ WorkerTargetChecks(t) ==
                 /\ wStage' = [wStage EXCEPT ![t] = "needs-action"]
                 /\ wPc' = [wPc EXCEPT ![t] = "writeStage"]
            ELSE UNCHANGED <<wStage, wPc, wFailReason>>
-  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-               wtLock, wAlive, wBase, wMerged, inWorktree, wtSrc, wtMergedValid,
-               validatedOwn, validT, conflictC, preflightBad, ciTopic, ciTarget,
-               tRemoteTip, tRemoteCommits, integratedInfo, retiredSnap,
-               pushedWhileHeld, extPushed>>
+  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, retirePhase,
+               rebeginCount, accept, prog, runs, terminalRuns, wtLock, wAlive,
+               wBase, wMerged, inWorktree, wtSrc, wtMergedValid, validatedOwn,
+               validT, conflictC, preflightBad, ciTopic, ciTarget, tRemoteTip,
+               tRemoteCommits, integratedInfo, retiredSnap, pushedWhileHeld,
+               extPushed>>
 
-(* --- Stage::Integrated (--retire) lines 253-256 & commands.rs retire_task lines 268-321 --- *)
+(* --- Stage::Integrated (--retire): retire_task() splits task delete, write_retired_run, finish file clear --- *)
 
-WorkerRetire(t) ==
+WorkerRetireRemoveTask(t) ==
   /\ wAlive[t] /\ wPc[t] = "doRetire"
+  /\ retirePhase[t] = "idle"
   /\ LET cur == CommitId(t, head[t])
      IN IF ~hold[t] /\ ~dirty[t] /\ cur = accept[t].commit /\ Published(cur)
         THEN /\ retired' = [retired EXCEPT ![t] = TRUE]
@@ -448,29 +494,98 @@ WorkerRetire(t) ==
                                   clean |-> ~dirty[t],
                                   notHeld |-> ~hold[t],
                                   published |-> Published(cur)]]
-             /\ accept' = [accept EXCEPT ![t] = [accept[t] EXCEPT !.exists = FALSE]]
-             /\ prog' = [prog EXCEPT ![t] = NoProg]
-             /\ wAlive' = [wAlive EXCEPT ![t] = FALSE]
-             /\ wPc' = [wPc EXCEPT ![t] = "idle"]
+             /\ retirePhase' = [retirePhase EXCEPT ![t] = "taskDeleted"]
+             /\ wPc' = [wPc EXCEPT ![t] = "retireWriteRun"]
              /\ UNCHANGED <<wStage, wFailReason>>
         ELSE /\ wFailReason' = [wFailReason EXCEPT ![t] = "retire-refused"]
              /\ wStage' = [wStage EXCEPT ![t] = "needs-action"]
              /\ wPc' = [wPc EXCEPT ![t] = "writeStage"]
-             /\ UNCHANGED <<retired, retiredSnap, accept, prog, wAlive>>
-  /\ UNCHANGED <<nextTs, head, dirty, hold, finPhase, queue, wtLock, wBase,
-               wMerged, inWorktree, wtSrc, wtMergedValid, validatedOwn, validT,
+             /\ UNCHANGED <<retired, retiredSnap, retirePhase>>
+  /\ UNCHANGED <<nextTs, head, dirty, hold, finPhase, rebeginCount, accept, prog,
+               runs, terminalRuns, queue, wtLock, wAlive, wBase, wMerged,
+               inWorktree, wtSrc, wtMergedValid, validatedOwn, validT,
                conflictC, preflightBad, ciTopic, ciTarget, tRemoteTip,
                tRemoteCommits, integratedInfo, pushedWhileHeld, badQueueRemove,
                extPushed>>
 
-(* --- Store::write_durable(&progress_path, &progress) BEFORE leave_queue (finish.rs:197-203) --- *)
+WorkerRetireWriteRun(t) ==
+  /\ wAlive[t] /\ wPc[t] = "retireWriteRun"
+  /\ retirePhase[t] = "taskDeleted"
+  /\ LET rid == accept[t].runId
+         cur == CommitId(t, head[t])
+     IN /\ IF TRUE \* Mutant hook: write_retired_run records Stage::Retired on runs/<id>.json
+           THEN /\ runs' = [runs EXCEPT ![rid] = [@ EXCEPT !.stage = "retired",
+                                                            !.published = retiredSnap[t].published,
+                                                            !.clean = retiredSnap[t].clean,
+                                                            !.notHeld = retiredSnap[t].notHeld]]
+                /\ terminalRuns' = IF MaxRebegins > 0
+                                   THEN terminalRuns \cup {[id |-> rid, task |-> t, commit |-> runs[rid].commit, stage |-> "retired"]}
+                                   ELSE terminalRuns
+           ELSE UNCHANGED <<runs, terminalRuns>>
+        /\ retirePhase' = [retirePhase EXCEPT ![t] = "runWritten"]
+        /\ wPc' = [wPc EXCEPT ![t] = "retireCleanup"]
+  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, rebeginCount,
+               accept, prog, queue, wtLock, wAlive, wStage, wBase, wMerged,
+               wFailReason, inWorktree, wtSrc, wtMergedValid, validatedOwn,
+               validT, conflictC, preflightBad, ciTopic, ciTarget, tRemoteTip,
+               tRemoteCommits, integratedInfo, retiredSnap, pushedWhileHeld,
+               badQueueRemove, extPushed>>
+
+WorkerRetireCleanup(t) ==
+  /\ wAlive[t] /\ wPc[t] = "retireCleanup"
+  /\ retirePhase[t] = "runWritten"
+  /\ accept' = [accept EXCEPT ![t] = [accept[t] EXCEPT !.exists = FALSE]]
+  /\ prog' = [prog EXCEPT ![t] = NoProg]
+  /\ retirePhase' = [retirePhase EXCEPT ![t] = "idle"]
+  /\ wAlive' = [wAlive EXCEPT ![t] = FALSE]
+  /\ wPc' = [wPc EXCEPT ![t] = "idle"]
+  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, rebeginCount,
+               runs, terminalRuns, queue, wtLock, wStage, wBase, wMerged,
+               wFailReason, inWorktree, wtSrc, wtMergedValid, validatedOwn,
+               validT, conflictC, preflightBad, ciTopic, ciTarget, tRemoteTip,
+               tRemoteCommits, integratedInfo, retiredSnap, pushedWhileHeld,
+               badQueueRemove, extPushed>>
+
+HousekeepingFinalizeRetire(t) ==
+  /\ ~wAlive[t]
+  /\ retired[t]
+  /\ accept[t].exists
+  /\ accept[t].retire
+  /\ prog[t].attempt = accept[t].attempt
+  /\ prog[t].stage \in {"integrated", "retired"}
+  /\ FinalizeCrashedRetire
+  /\ LET rid == accept[t].runId
+     IN /\ runs' = [runs EXCEPT ![rid] = [@ EXCEPT !.stage = "retired",
+                                                      !.published = retiredSnap[t].published,
+                                                      !.clean = retiredSnap[t].clean,
+                                                      !.notHeld = retiredSnap[t].notHeld]]
+        /\ terminalRuns' = IF MaxRebegins > 0
+                           THEN terminalRuns \cup {[id |-> rid, task |-> t, commit |-> runs[rid].commit, stage |-> "retired"]}
+                           ELSE terminalRuns
+        /\ accept' = [accept EXCEPT ![t] = [accept[t] EXCEPT !.exists = FALSE]]
+        /\ prog' = [prog EXCEPT ![t] = NoProg]
+        /\ retirePhase' = [retirePhase EXCEPT ![t] = "idle"]
+  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, rebeginCount,
+               queue, wtLock, wAlive, wPc, wStage, wBase, wMerged, wFailReason,
+               inWorktree, wtSrc, wtMergedValid, validatedOwn, validT,
+               conflictC, preflightBad, ciTopic, ciTarget, tRemoteTip,
+               tRemoteCommits, integratedInfo, retiredSnap, pushedWhileHeld,
+               badQueueRemove, extPushed>>
+
+(* --- write_run() and Store::write_durable(&progress_path, &progress) BEFORE leave_queue (finish.rs:343-346) --- *)
 
 WorkerWriteStage(t) ==
   /\ wAlive[t] /\ wPc[t] = "writeStage"
-  /\ prog' = [prog EXCEPT ![t] = [attempt |-> accept[t].attempt,
-                                  stage |-> wStage[t],
-                                  baseObj |-> wBase[t],
-                                  mergedObj |-> wMerged[t]]]
+  /\ LET rid == accept[t].runId
+         st == wStage[t]
+     IN /\ prog' = [prog EXCEPT ![t] = [attempt |-> accept[t].attempt,
+                                        stage |-> st,
+                                        baseObj |-> wBase[t],
+                                        mergedObj |-> wMerged[t]]]
+        /\ runs' = [runs EXCEPT ![rid] = [@ EXCEPT !.stage = st]]
+        /\ terminalRuns' = IF MaxRebegins > 0 /\ st = "needs-action"
+                           THEN terminalRuns \cup {[id |-> rid, task |-> t, commit |-> runs[rid].commit, stage |-> "needs-action"]}
+                           ELSE terminalRuns
   /\ integratedInfo' =
        IF wStage[t] = "integrated"
        THEN [integratedInfo EXCEPT ![t] = [done |-> TRUE,
@@ -489,13 +604,14 @@ WorkerWriteStage(t) ==
                          [] wStage[t] = "integrated" -> "doRetire"
                          [] OTHER -> "idle"]
           /\ UNCHANGED wAlive
-  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, queue,
-               wtLock, wStage, wBase, wMerged, wFailReason, inWorktree, wtSrc,
-               wtMergedValid, validatedOwn, validT, conflictC, preflightBad,
-               ciTopic, ciTarget, tRemoteTip, tRemoteCommits, retiredSnap,
-               pushedWhileHeld, badQueueRemove, extPushed>>
+  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, retirePhase,
+               rebeginCount, accept, queue, wtLock, wStage, wBase, wMerged,
+               wFailReason, inWorktree, wtSrc, wtMergedValid, validatedOwn,
+               validT, conflictC, preflightBad, ciTopic, ciTarget, tRemoteTip,
+               tRemoteCommits, retiredSnap, pushedWhileHeld, badQueueRemove,
+               extPushed>>
 
-(* --- worker.leave_queue() runs AFTER durable progress is written (finish.rs:201-203) --- *)
+(* --- worker.leave_queue() runs AFTER durable progress is written (finish.rs:348-350) --- *)
 
 WorkerLeaveQueue(t) ==
   /\ wAlive[t] /\ wPc[t] = "leaveQueue"
@@ -507,11 +623,12 @@ WorkerLeaveQueue(t) ==
                 /\ wPc' = [wPc EXCEPT ![t] = "idle"]
            ELSE /\ wPc' = [wPc EXCEPT ![t] = "waitTargetCI"]
                 /\ UNCHANGED wAlive
-  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-               wtLock, wStage, wBase, wMerged, wFailReason, inWorktree, wtSrc,
-               wtMergedValid, validatedOwn, validT, conflictC, preflightBad,
-               ciTopic, ciTarget, tRemoteTip, tRemoteCommits, integratedInfo,
-               retiredSnap, pushedWhileHeld, extPushed>>
+  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, retirePhase,
+               rebeginCount, accept, prog, runs, terminalRuns, wtLock, wStage,
+               wBase, wMerged, wFailReason, inWorktree, wtSrc, wtMergedValid,
+               validatedOwn, validT, conflictC, preflightBad, ciTopic, ciTarget,
+               tRemoteTip, tRemoteCommits, integratedInfo, retiredSnap,
+               pushedWhileHeld, extPushed>>
 
 (* --- Process crash/kill: workers/<t>.lock and integration_lock drop, disk files stay --- *)
 
@@ -520,13 +637,15 @@ WorkerKill(t) ==
   /\ wAlive[t]
   /\ wAlive' = [wAlive EXCEPT ![t] = FALSE]
   /\ wPc' = [wPc EXCEPT ![t] = "idle"]
+  /\ retirePhase' = [retirePhase EXCEPT ![t] = "idle"]
   /\ wtLock' = IF wtLock = t THEN None ELSE wtLock
   /\ inWorktree' = inWorktree \ {t}
-  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-               queue, wStage, wBase, wMerged, wFailReason, wtSrc,
-               wtMergedValid, validatedOwn, validT, conflictC, preflightBad,
-               ciTopic, ciTarget, tRemoteTip, tRemoteCommits, integratedInfo,
-               retiredSnap, pushedWhileHeld, badQueueRemove, extPushed>>
+  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, rebeginCount,
+               accept, prog, runs, terminalRuns, queue, wStage, wBase, wMerged,
+               wFailReason, wtSrc, wtMergedValid, validatedOwn, validT,
+               conflictC, preflightBad, ciTopic, ciTarget, tRemoteTip,
+               tRemoteCommits, integratedInfo, retiredSnap, pushedWhileHeld,
+               badQueueRemove, extPushed>>
 
 (* --- Environment events: CI completion, user commits/dirty/hold, external target push --- *)
 
@@ -534,10 +653,11 @@ CiTopicCompletes ==
   \E c \in TaskCommits, r \in {"success", "failure"} :
     /\ ciTopic[c] = "pending"
     /\ ciTopic' = [ciTopic EXCEPT ![c] = r]
-    /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-                 queue, wtLock, wAlive, wPc, wStage, wBase, wMerged, wFailReason,
-                 inWorktree, wtSrc, wtMergedValid, validatedOwn, validT,
-                 conflictC, preflightBad, ciTarget, tRemoteTip, tRemoteCommits,
+    /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, retirePhase,
+                 rebeginCount, accept, prog, runs, terminalRuns, queue, wtLock,
+                 wAlive, wPc, wStage, wBase, wMerged, wFailReason, inWorktree,
+                 wtSrc, wtMergedValid, validatedOwn, validT, conflictC,
+                 preflightBad, ciTarget, tRemoteTip, tRemoteCommits,
                  integratedInfo, retiredSnap, pushedWhileHeld, badQueueRemove,
                  extPushed>>
 
@@ -545,10 +665,11 @@ CiTargetCompletes ==
   \E m \in TargetCommits, r \in {"success", "failure"} :
     /\ ciTarget[m] = "pending"
     /\ ciTarget' = [ciTarget EXCEPT ![m] = r]
-    /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-                 queue, wtLock, wAlive, wPc, wStage, wBase, wMerged, wFailReason,
-                 inWorktree, wtSrc, wtMergedValid, validatedOwn, validT,
-                 conflictC, preflightBad, ciTopic, tRemoteTip, tRemoteCommits,
+    /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, retirePhase,
+                 rebeginCount, accept, prog, runs, terminalRuns, queue, wtLock,
+                 wAlive, wPc, wStage, wBase, wMerged, wFailReason, inWorktree,
+                 wtSrc, wtMergedValid, validatedOwn, validT, conflictC,
+                 preflightBad, ciTopic, tRemoteTip, tRemoteCommits,
                  integratedInfo, retiredSnap, pushedWhileHeld, badQueueRemove,
                  extPushed>>
 
@@ -558,24 +679,25 @@ UserCommitFix(t) ==
   /\ head[t] <= MaxEdits
   /\ head' = [head EXCEPT ![t] = head[t] + 1]
   /\ dirty' = [dirty EXCEPT ![t] = FALSE]
-  /\ UNCHANGED <<nextTs, hold, retired, finPhase, accept, prog, queue, wtLock,
-               wAlive, wPc, wStage, wBase, wMerged, wFailReason, inWorktree,
-               wtSrc, wtMergedValid, validatedOwn, validT, conflictC,
-               preflightBad, ciTopic, ciTarget, tRemoteTip, tRemoteCommits,
-               integratedInfo, retiredSnap, pushedWhileHeld, badQueueRemove,
-               extPushed>>
+  /\ UNCHANGED <<nextTs, hold, retired, finPhase, retirePhase, rebeginCount,
+               accept, prog, runs, terminalRuns, queue, wtLock, wAlive, wPc,
+               wStage, wBase, wMerged, wFailReason, inWorktree, wtSrc,
+               wtMergedValid, validatedOwn, validT, conflictC, preflightBad,
+               ciTopic, ciTarget, tRemoteTip, tRemoteCommits, integratedInfo,
+               retiredSnap, pushedWhileHeld, badQueueRemove, extPushed>>
 
 UserToggleDirty(t) ==
   /\ RetireMode
   /\ ~retired[t]
   /\ ~dirty[t]
   /\ dirty' = [dirty EXCEPT ![t] = TRUE]
-  /\ UNCHANGED <<nextTs, head, hold, retired, finPhase, accept, prog, queue,
-               wtLock, wAlive, wPc, wStage, wBase, wMerged, wFailReason,
-               inWorktree, wtSrc, wtMergedValid, validatedOwn, validT,
-               conflictC, preflightBad, ciTopic, ciTarget, tRemoteTip,
-               tRemoteCommits, integratedInfo, retiredSnap, pushedWhileHeld,
-               badQueueRemove, extPushed>>
+  /\ UNCHANGED <<nextTs, head, hold, retired, finPhase, retirePhase,
+               rebeginCount, accept, prog, runs, terminalRuns, queue, wtLock,
+               wAlive, wPc, wStage, wBase, wMerged, wFailReason, inWorktree,
+               wtSrc, wtMergedValid, validatedOwn, validT, conflictC,
+               preflightBad, ciTopic, ciTarget, tRemoteTip, tRemoteCommits,
+               integratedInfo, retiredSnap, pushedWhileHeld, badQueueRemove,
+               extPushed>>
 
 UserHold(t) ==
   /\ RetireMode
@@ -583,22 +705,72 @@ UserHold(t) ==
   /\ ~hold[t]
   /\ wPc[t] # "pushTargetExec"
   /\ hold' = [hold EXCEPT ![t] = TRUE]
-  /\ UNCHANGED <<nextTs, head, dirty, retired, finPhase, accept, prog, queue,
-               wtLock, wAlive, wPc, wStage, wBase, wMerged, wFailReason,
-               inWorktree, wtSrc, wtMergedValid, validatedOwn, validT,
-               conflictC, preflightBad, ciTopic, ciTarget, tRemoteTip,
-               tRemoteCommits, integratedInfo, retiredSnap, pushedWhileHeld,
-               badQueueRemove, extPushed>>
+  /\ UNCHANGED <<nextTs, head, dirty, retired, finPhase, retirePhase,
+               rebeginCount, accept, prog, runs, terminalRuns, queue, wtLock,
+               wAlive, wPc, wStage, wBase, wMerged, wFailReason, inWorktree,
+               wtSrc, wtMergedValid, validatedOwn, validT, conflictC,
+               preflightBad, ciTopic, ciTarget, tRemoteTip, tRemoteCommits,
+               integratedInfo, retiredSnap, pushedWhileHeld, badQueueRemove,
+               extPushed>>
 
 UserReleaseHold(t) ==
   /\ RetireMode
   /\ ~retired[t]
   /\ hold[t]
   /\ hold' = [hold EXCEPT ![t] = FALSE]
-  /\ UNCHANGED <<nextTs, head, dirty, retired, finPhase, accept, prog, queue,
-               wtLock, wAlive, wPc, wStage, wBase, wMerged, wFailReason,
-               inWorktree, wtSrc, wtMergedValid, validatedOwn, validT,
-               conflictC, preflightBad, ciTopic, ciTarget, tRemoteTip,
+  /\ UNCHANGED <<nextTs, head, dirty, retired, finPhase, retirePhase,
+               rebeginCount, accept, prog, runs, terminalRuns, queue, wtLock,
+               wAlive, wPc, wStage, wBase, wMerged, wFailReason, inWorktree,
+               wtSrc, wtMergedValid, validatedOwn, validT, conflictC,
+               preflightBad, ciTopic, ciTarget, tRemoteTip, tRemoteCommits,
+               integratedInfo, retiredSnap, pushedWhileHeld, badQueueRemove,
+               extPushed>>
+
+UserExplicitRetire(t) ==
+  /\ MaxRebegins > 0
+  /\ ~retired[t]
+  /\ ~wAlive[t]
+  /\ ~Running(t)
+  /\ ~hold[t]
+  /\ ~dirty[t]
+  /\ (~accept[t].exists \/ Published(CommitId(t, head[t])))
+  /\ retired' = [retired EXCEPT ![t] = TRUE]
+  /\ accept' = [accept EXCEPT ![t] = NoAccept]
+  /\ prog' = [prog EXCEPT ![t] = NoProg]
+  /\ UNCHANGED <<nextTs, head, dirty, hold, finPhase, retirePhase, rebeginCount,
+               runs, terminalRuns, queue, wtLock, wAlive, wPc, wStage, wBase,
+               wMerged, wFailReason, inWorktree, wtSrc, wtMergedValid,
+               validatedOwn, validT, conflictC, preflightBad, ciTopic, ciTarget,
+               tRemoteTip, tRemoteCommits, integratedInfo, retiredSnap,
+               pushedWhileHeld, badQueueRemove, extPushed>>
+
+UserRebegin(t) ==
+  /\ MaxRebegins > 0
+  /\ retired[t]
+  /\ ~wAlive[t]
+  /\ rebeginCount[t] < MaxRebegins
+  /\ rebeginCount' = [rebeginCount EXCEPT ![t] = rebeginCount[t] + 1]
+  /\ retired' = [retired EXCEPT ![t] = FALSE]
+  /\ LET needFin == /\ accept[t].exists
+                    /\ accept[t].retire
+                    /\ prog[t].attempt = accept[t].attempt
+                    /\ prog[t].stage \in {"integrated", "retired"}
+         rid == accept[t].runId
+     IN IF needFin /\ FinalizeCrashedRetire
+        THEN /\ runs' = [runs EXCEPT ![rid] = [@ EXCEPT !.stage = "retired",
+                                                         !.published = retiredSnap[t].published,
+                                                         !.clean = retiredSnap[t].clean,
+                                                         !.notHeld = retiredSnap[t].notHeld]]
+             /\ terminalRuns' = terminalRuns \cup {[id |-> rid, task |-> t, commit |-> runs[rid].commit, stage |-> "retired"]}
+        ELSE UNCHANGED <<runs, terminalRuns>>
+  /\ accept' = [accept EXCEPT ![t] = NoAccept]
+  /\ prog' = [prog EXCEPT ![t] = NoProg]
+  /\ retirePhase' = [retirePhase EXCEPT ![t] = "idle"]
+  /\ wStage' = [wStage EXCEPT ![t] = "none"]
+  /\ wFailReason' = [wFailReason EXCEPT ![t] = None]
+  /\ UNCHANGED <<nextTs, head, dirty, hold, finPhase, queue, wtLock, wAlive, wPc,
+               wBase, wMerged, inWorktree, wtSrc, wtMergedValid, validatedOwn,
+               validT, conflictC, preflightBad, ciTopic, ciTarget, tRemoteTip,
                tRemoteCommits, integratedInfo, retiredSnap, pushedWhileHeld,
                badQueueRemove, extPushed>>
 
@@ -608,10 +780,11 @@ ExternalTargetPush ==
   /\ tRemoteTip' = ExtObj
   /\ tRemoteCommits' = tRemoteCommits \cup {"ext"}
   /\ ciTarget' = [ciTarget EXCEPT !["ext"] = IF Gated THEN "pending" ELSE "success"]
-  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, accept, prog,
-               queue, wtLock, wAlive, wPc, wStage, wBase, wMerged, wFailReason,
-               inWorktree, wtSrc, wtMergedValid, validatedOwn, validT,
-               conflictC, preflightBad, ciTopic, integratedInfo, retiredSnap,
+  /\ UNCHANGED <<nextTs, head, dirty, hold, retired, finPhase, retirePhase,
+               rebeginCount, accept, prog, runs, terminalRuns, queue, wtLock,
+               wAlive, wPc, wStage, wBase, wMerged, wFailReason, inWorktree,
+               wtSrc, wtMergedValid, validatedOwn, validT, conflictC,
+               preflightBad, ciTopic, integratedInfo, retiredSnap,
                pushedWhileHeld, badQueueRemove>>
 
 Done ==
@@ -632,7 +805,10 @@ Next ==
        \/ WorkerPushAcquire(t)
        \/ WorkerPushTarget(t)
        \/ WorkerTargetChecks(t)
-       \/ WorkerRetire(t)
+       \/ WorkerRetireRemoveTask(t)
+       \/ WorkerRetireWriteRun(t)
+       \/ WorkerRetireCleanup(t)
+       \/ HousekeepingFinalizeRetire(t)
        \/ WorkerWriteStage(t)
        \/ WorkerLeaveQueue(t)
        \/ WorkerKill(t)
@@ -640,6 +816,8 @@ Next ==
        \/ UserToggleDirty(t)
        \/ UserHold(t)
        \/ UserReleaseHold(t)
+       \/ UserExplicitRetire(t)
+       \/ UserRebegin(t)
   \/ CiTopicCompletes
   \/ CiTargetCompletes
   \/ ExternalTargetPush
@@ -685,4 +863,24 @@ NoTargetPushWhileHeld ==
 \* leave_queue() never deletes another running task's queue entry.
 QueueEntryMatchesOwner ==
   ~badQueueRemove
+
+\* Every run recorded as retired came from --retire with clean, unheld, published work,
+\* and once a run finishes --retire cleanup its run record cannot stay stuck at integrated.
+RetiredRunMatchesExecution ==
+  /\ \A i \in DOMAIN runs :
+       runs[i].stage = "retired" =>
+         (runs[i].retire /\ runs[i].published /\ runs[i].clean /\ runs[i].notHeld)
+  /\ \A i \in DOMAIN runs :
+       (runs[i].retire
+        /\ (~accept[runs[i].task].exists \/ accept[runs[i].task].runId # i)
+        /\ retirePhase[runs[i].task] = "idle")
+       => runs[i].stage \in {"retired", "needs-action"}
+
+\* Terminal retired or failed runs keep their exact task and commit across task re-begins.
+RunIsolationAcrossRebegin ==
+  \A snap \in terminalRuns :
+    /\ snap.id \in DOMAIN runs
+    /\ runs[snap.id].task = snap.task
+    /\ runs[snap.id].commit = snap.commit
+    /\ runs[snap.id].stage = snap.stage
 =============================================================================

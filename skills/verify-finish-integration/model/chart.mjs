@@ -97,6 +97,7 @@ export const step = (action, from, to) => {
   const multi = Object.keys(from.accept || {}).length > 1;
   switch (action) {
     case "FinishWriteAccept":
+    case "ChartFinish":
       return multi ? `${t.toUpperCase()} の wl finish が accept.json を書込む` : "wl finish";
     case "FinishEnqueue":
       return `${t.toUpperCase()} を queue へ登録`;
@@ -126,7 +127,13 @@ export const step = (action, from, to) => {
     case "WorkerTargetChecks":
       return to.wStage?.[t] === "integrated" ? "統合先 check 成功" : "統合先 check 失敗";
     case "WorkerRetire":
+    case "WorkerRetireRemoveTask":
       return to.retired?.[t] ? "自動退役 (--retire)" : "退役拒否";
+    case "WorkerRetireWriteRun":
+    case "WorkerRetireCleanup":
+      return null;
+    case "HousekeepingFinalizeRetire":
+      return "回収で退役を完了";
     case "WorkerWriteStage": {
       const s = to.prog?.[t]?.stage;
       if (s === "needs-action") return "要対応 (needs-action) を記録";
