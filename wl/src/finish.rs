@@ -617,29 +617,55 @@ impl GitHub {
 fn check_states<'a>(github: &GitHub, slug: &str, sha: &str, checks: &'a [RequiredCheck]) -> Result<Vec<(&'a RequiredCheck, CheckState)>> {
     let body = github.get(&format!("repos/{slug}/commits/{sha}/check-runs?per_page=100"))?;
     let runs = body["check_runs"].as_array().cloned().unwrap_or_default();
-    Ok(checks
-        .iter()
-        .map(|check| {
-            let latest = runs
-                .iter()
-                .filter(|r| r["name"] == check.name.as_str() && r["app"]["slug"] == check.app.as_str())
-                .max_by_key(|r| r["id"].as_u64().unwrap_or(0));
-            let state = match latest {
-                None => CheckState::Pending,
-                // GitHub can record the result and leave the status behind; such a run never finishes (#6).
-                Some(run) if run["status"] != "completed" && run["conclusion"].is_string() && run["completed_at"].is_string() => CheckState::Unfinalized(format!(
-                    "GitHub left it {} with conclusion {}; rerun it with gh run rerun -R {slug} --job {}",
-                    run["status"].as_str().unwrap_or(""),
-                    run["conclusion"].as_str().unwrap_or(""),
-                    run["id"]
-                )),
-                Some(run) if run["status"] != "completed" => CheckState::Pending,
-                Some(run) if run["conclusion"] == "success" => CheckState::Succeeded,
-                Some(run) => CheckState::Failed(format!("{} {}", run["conclusion"], run["html_url"])),
-            };
-            (check, state)
-        })
-        .collect())
+    let mut suites: Option<Vec<Value>> = None;
+    let mut states = Vec::with_capacity(checks.len());
+    for check in checks {
+        let latest = runs
+            .iter()
+            .filter(|r| r["name"] == check.name.as_str() && r["app"]["slug"] == check.app.as_str())
+            .max_by_key(|r| r["id"].as_u64().unwrap_or(0));
+        let state = match latest {
+            None => {
+                if suites.is_none() {
+                    let body = github.get(&format!("repos/{slug}/commits/{sha}/check-suites?per_page=100"))?;
+                    suites = Some(body["check_suites"].as_array().cloned().unwrap_or_default());
+                }
+                match unstarted_workflow(github, slug, sha, &check.app, suites.as_deref().unwrap_or_default())? {
+                    Some(detail) => CheckState::Failed(detail),
+                    None => CheckState::Pending,
+                }
+            }
+            // GitHub can record the result and leave the status behind; such a run never finishes (#6).
+            Some(run) if run["status"] != "completed" && run["conclusion"].is_string() && run["completed_at"].is_string() => CheckState::Unfinalized(format!(
+                "GitHub left it {} with conclusion {}; rerun it with gh run rerun -R {slug} --job {}",
+                run["status"].as_str().unwrap_or(""),
+                run["conclusion"].as_str().unwrap_or(""),
+                run["id"]
+            )),
+            Some(run) if run["status"] != "completed" => CheckState::Pending,
+            Some(run) if run["conclusion"] == "success" => CheckState::Succeeded,
+            Some(run) => CheckState::Failed(format!("{} {}", run["conclusion"], run["html_url"])),
+        };
+        states.push((check, state));
+    }
+    Ok(states)
+}
+
+/// A check suite of `app` that failed without a single check run is a workflow GitHub could not start, such as one whose
+/// file GitHub rejects (#2), so a missing check will never appear. While another suite of `app` is unfinished, the check
+/// may still appear there. Suites of other apps are left out: GitHub keeps some of them queued for good.
+fn unstarted_workflow(github: &GitHub, slug: &str, sha: &str, app: &str, suites: &[Value]) -> Result<Option<String>> {
+    let own: Vec<&Value> = suites.iter().filter(|s| s["app"]["slug"] == app).collect();
+    if own.iter().any(|s| s["status"] != "completed") {
+        return Ok(None);
+    }
+    let Some(suite) = own.into_iter().find(|s| matches!(s["conclusion"].as_str(), Some("failure" | "startup_failure")) && s["latest_check_runs_count"] == 0) else {
+        return Ok(None);
+    };
+    let body = github.get(&format!("repos/{slug}/actions/runs?head_sha={sha}&per_page=100"))?;
+    let run = body["workflow_runs"].as_array().into_iter().flatten().find(|r| r["check_suite_id"] == suite["id"]);
+    let url = run.and_then(|r| r["html_url"].as_str()).or_else(|| suite["url"].as_str()).unwrap_or_default();
+    Ok(Some(format!("the workflow could not start: its check suite concluded {} with no check runs; {url}", suite["conclusion"].as_str().unwrap_or_default())))
 }
 
 /// Best effort: a person away from the terminal learns that a finish needs them.

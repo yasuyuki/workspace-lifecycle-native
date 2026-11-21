@@ -282,6 +282,12 @@ fn a_concluded_check_github_never_completed_needs_action_with_its_rerun() {
 }
 
 #[cfg(unix)]
+#[test]
+fn a_workflow_github_could_not_start_needs_action_with_its_run() {
+    a_required_check_needs_action("workflow failure", &["required check test", "could not start", "https://github.com/example/product/actions/runs/44"]);
+}
+
+#[cfg(unix)]
 fn a_required_check_needs_action(last: &str, details: &[&str]) {
     use std::os::unix::fs::PermissionsExt;
     let checks = r#"[{"app": "github-actions", "name": "test"}]"#;
@@ -315,9 +321,16 @@ fn a_required_check_needs_action(last: &str, details: &[&str]) {
                     }
                     head.push_str(&line);
                 }
+                let path = head.split_whitespace().nth(1).unwrap_or_default().to_owned();
                 requests.lock().unwrap().push(head);
                 let c = conclusion.lock().unwrap().clone();
-                let body = if c.is_empty() {
+                // Until then the Actions suite is queued without runs; another app's suite stays queued for good.
+                let body = if path.contains("/check-suites") {
+                    let (status, conclusion) = if c == "workflow failure" { ("completed", r#""failure""#) } else { ("queued", "null") };
+                    format!(r#"{{"check_suites":[{{"id":7,"app":{{"slug":"github-actions"}},"status":"{status}","conclusion":{conclusion},"latest_check_runs_count":0,"url":"s"}},{{"id":8,"app":{{"slug":"cursor"}},"status":"queued","conclusion":null,"latest_check_runs_count":0}}]}}"#)
+                } else if path.contains("/actions/runs") {
+                    r#"{"workflow_runs":[{"id":44,"check_suite_id":7,"html_url":"https://github.com/example/product/actions/runs/44"}]}"#.to_owned()
+                } else if c.is_empty() || c == "workflow failure" {
                     r#"{"check_runs":[]}"#.to_owned()
                 } else if c == "unfinalized" {
                     r#"{"check_runs":[{"id":1,"name":"test","app":{"slug":"github-actions"},"status":"in_progress","conclusion":"success","completed_at":"2026-11-20T23:29:51Z","html_url":"u"}]}"#.to_owned()
@@ -339,6 +352,7 @@ fn a_required_check_needs_action(last: &str, details: &[&str]) {
     run(&["finish", "alpha"]);
     std::thread::sleep(Duration::from_secs(3));
     assert_eq!(f.origin_main(), before, "nothing reaches the target while the check is pending");
+    assert_ne!(run(&["status", "alpha"])["tasks"][0]["finish"]["stage"], "needs-action", "a queued suite keeps the wait");
     *conclusion.lock().unwrap() = last.to_owned();
     let start = Instant::now();
     loop {
@@ -352,10 +366,19 @@ fn a_required_check_needs_action(last: &str, details: &[&str]) {
         std::thread::sleep(Duration::from_millis(200));
     }
     assert_eq!(f.origin_main(), before);
+    // The attempt has ended, so a corrected commit finishes again.
+    git(&worktree, &["commit", "--allow-empty", "-m", "fix"]);
+    let again = run(&["finish", "alpha"]);
+    assert_eq!(again["attempt"], 2, "{again}");
+    let start = Instant::now();
+    while run(&["status", "alpha"])["tasks"][0]["finish"]["stage"] != "needs-action" {
+        assert!(start.elapsed() < Duration::from_secs(60));
+        std::thread::sleep(Duration::from_millis(200));
+    }
     let requests = requests.lock().unwrap().clone();
     assert!(requests[0].contains("/repos/example/product/commits/"), "{requests:?}");
     assert!(requests.iter().all(|r| r.to_lowercase().contains("authorization: bearer the-token")), "{requests:?}");
-    assert_eq!(std::fs::read_to_string(&gh_calls).unwrap(), "auth token\n", "gh starts once per wait, not once per poll");
+    assert_eq!(std::fs::read_to_string(&gh_calls).unwrap(), "auth token\nauth token\n", "gh starts once per wait of the two attempts, not once per poll");
     let _ = worktree;
 }
 
