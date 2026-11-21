@@ -31,6 +31,10 @@ The helper confines Git transport to local files and maps the fake GitHub
 origin to the disposable bare repository. It points `WL_GITHUB_API` at the
 run's loopback port, gives `gh auth token` a synthetic environment token,
 and supplies the same local preflight fixture as the task-lifecycle verifier.
+The API serves the commit's check runs, its check suites, and its workflow
+runs. Outside the failed-suite scenario, the Actions suite stays queued
+without runs, so a commit with no matching run keeps waiting. Another app's
+suite stays queued in every scenario, as GitHub leaves some of them.
 
 ## Drive and judge
 
@@ -41,10 +45,12 @@ and supplies the same local preflight fixture as the task-lifecycle verifier.
 | Commit a fix and run `wl finish alpha` again. | Attempt 2 accepts the corrected SHA. Its successful check permits the target push. The bare target points to a distinct merge SHA that contains the patch. |
 | Serve success for the pushed merge SHA. | The worker stays target-pushed until it sees that SHA's success, then reports integrated. The target ref still points to the checked SHA. |
 
-Add `--scenario failed-suite` to reproduce Issue #2. The expected contract
-is needs-action at the next poll and a URL in the detail. On the baseline the
-task remains prepared and refuses to finish the corrected commit. The helper
-records this as `fail`, then supplies a failing check run to end the scratch worker.
+Add `--scenario failed-suite` for Issue #2. The Actions suite completes as
+failed with no check runs, like a workflow file that GitHub rejects. The task
+must reach needs-action at the next poll with the workflow run's URL in the
+detail, and a corrected commit must get attempt 2. A build from before the
+fix stays prepared and refuses the corrected commit. The helper records that
+as `fail`, then supplies a failing check run to end the scratch worker.
 
 Add `--scenario unexpected-success` to challenge the detector with a success
 where the gate scenario requires pending. It must fail and still clean up.
@@ -64,4 +70,4 @@ confirm completion, retain the scratch path in `result.json` for diagnosis.
 
 Live GitHub, WSL offload, and Windows toast delivery remain outside this
 recipe. The [formal skill](../../verify-required-checks/SKILL.md) covers bounded
-required-check transitions and the failed-suite counterexample.
+required-check transitions and the failed-suite mutation.

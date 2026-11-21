@@ -96,19 +96,28 @@ def run(args, evidence):
 
     class Api(BaseHTTPRequestHandler):
         def do_GET(self):
-            match = re.fullmatch(
+            commits = re.fullmatch(
                 r"/repos/example/product/commits/([0-9a-f]{40})/check-(runs|suites)(?:\?per_page=100)?",
                 self.path,
             )
+            actions = re.fullmatch(r"/repos/example/product/actions/runs\?head_sha=([0-9a-f]{40})&per_page=100", self.path)
             authed = self.headers.get("Authorization") == "Bearer wl-verifier-synthetic"
-            sha, route = match.groups() if match else (None, None)
-            if not authed or not match:
+            sha, route = commits.groups() if commits else (actions.group(1), "workflow-runs") if actions else (None, None)
+            if not authed or not route:
                 code, body = 400, {}
             elif route == "suites":
+                # The Actions suite fails without runs only in the failed-suite scenario; elsewhere it is still
+                # queued. Another app's suite stays queued for good, as GitHub leaves it.
+                failed = args.scenario == "failed-suite"
                 code, body = 200, {"check_suites": [{
-                    "id": 1, "status": "completed", "conclusion": "failure",
-                    "app": {"slug": APP}, "latest_check_runs_count": 0, "url": DETAIL_URL,
+                    "id": 1, "status": "completed" if failed else "queued", "conclusion": "failure" if failed else None,
+                    "app": {"slug": APP}, "latest_check_runs_count": 0, "url": REPOSITORY,
+                }, {
+                    "id": 2, "status": "queued", "conclusion": None,
+                    "app": {"slug": "other-app"}, "latest_check_runs_count": 0,
                 }]}
+            elif route == "workflow-runs":
+                code, body = 200, {"workflow_runs": [{"id": 1, "check_suite_id": 1, "html_url": DETAIL_URL}]}
             else:
                 runs = [check_run(1, conclusion="failure")] if draining else replies.get(sha, fallback)
                 code, body = 200, {"check_runs": runs}
@@ -207,7 +216,8 @@ def run(args, evidence):
         result["status"] = "fail"
         result["expectations"] = (
             ["Completed failed suite without check runs reaches needs-action at the next poll",
-             "Failure detail names the run URL", "Origin main stays at its original commit"]
+             "Failure detail names the run URL", "Origin main stays at its original commit",
+             "A corrected commit gets a new attempt"]
             if args.scenario == "failed-suite" else
             ["Wrong-app success and superseded success leave the topic prepared",
              "A failed required topic run leaves origin main unchanged and names the run URL",
@@ -237,13 +247,16 @@ def run(args, evidence):
                   "the next poll after the failed workflow")
             observed = finish_status()
             expect("failed workflow leaves main unchanged", origin_ref("main"), base)
+            corrected = commit_file(worktree, "fixed.txt", "corrected\n")
             if observed["stage"] == "prepared":
-                corrected = commit_file(worktree, "fixed.txt", "corrected\n")
                 refused = wl("finish", "alpha", exit_code=2)
                 expect("the corrected SHA is blocked by the running attempt",
                        corrected != topic and "still running" in refused["error"], True)
             expect("failed workflow leaves needs-action at the next poll", observed["stage"], "needs-action")
             expect("failed workflow detail identifies the run", DETAIL_URL in observed["detail"], True)
+            until(lambda: not status()["background"], "first worker exits")
+            accepted = wl("finish", "alpha")
+            expect("corrected SHA gets a second attempt", (accepted["attempt"], accepted["commit"]), (2, corrected))
         else:
             until(lambda: sum(event["sha"] == topic for event in result["api"]) >= 2
                   or finish_status()["stage"] != "prepared", "a second poll or a stage change")

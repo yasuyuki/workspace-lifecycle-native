@@ -1,8 +1,8 @@
 export const title = "Required checks during wl finish";
 
-export function state({ stage, ignoredWorkflowFailure }) {
-  if (ignoredWorkflowFailure && stage === "prepared") {
-    return "Still waiting after workflow failure";
+export function state({ stage, topic, target }) {
+  if ((stage === "prepared" && topic === "unstarted") || (stage === "target pushed" && target === "unstarted")) {
+    return "Still waiting after workflow could not start";
   }
   return {
     prepared: "Waiting for topic checks",
@@ -15,13 +15,14 @@ export function state({ stage, ignoredWorkflowFailure }) {
 }
 
 export function step(action, from, to) {
+  const unstarted = (action === "PollTopic" ? to.topic : to.target) === "unstarted";
   return {
-    PollTopic: to.stage === "topic checked" && to.topic !== "passed"
-      ? "a different app reports success"
+    PollTopic: unstarted ? "workflow cannot start"
+      : to.stage === "topic checked" && to.topic !== "passed" ? "a different app reports success"
       : to.stage === "topic checked" ? "required topic check passes" : "required topic check fails",
-    PollEmptyFailedSuite: "workflow fails without creating check runs",
     PushTarget: "push prepared commit to target",
-    PollTarget: to.stage === "integrated" ? "required target check passes" : "required target check fails",
+    PollTarget: unstarted ? "workflow cannot start"
+      : to.stage === "integrated" ? "required target check passes" : "required target check fails",
     Retry: "finish a corrected topic commit",
     Done: "finish completes",
   }[action];

@@ -2,28 +2,16 @@
 title: "Required checks during wl finish"
 ---
 stateDiagram-v2
-  state "Legend" as legend {
-    lg0: Breaks WorkflowFailureStopsNextPoll
-    lg1: Path to the WorkflowFailureStopsNextPoll bug
-  }
-  class lg0 breaks
-  class lg1 bugPath
   s0: Waiting for topic checks
   s1: Needs action before target push
-  s2: Still waiting after workflow failure
-  s3: Topic checks passed
-  s4: Waiting for checks on pushed target
-  s5: Needs action after target push
-  s6: Integrated
+  s2: Topic checks passed
+  s3: Waiting for checks on pushed target
+  s4: Needs action after target push
+  s5: Integrated
   [*] --> s0
-  s0 --> s1: required topic check fails
-  s0 --> s2: workflow fails without creating check runs
-  s0 --> s3: required topic check passes
+  s0 --> s1: required topic check fails or workflow cannot start
+  s0 --> s2: required topic check passes
   s1 --> s0: finish a corrected topic commit
-  s3 --> s4: push prepared commit to target
-  s4 --> s5: required target check fails
-  s4 --> s6: required target check passes
-  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
-  class s0 bugPath
-  class s2 breaks
-  class s2 bugPath
+  s2 --> s3: push prepared commit to target
+  s3 --> s4: required target check fails or workflow cannot start
+  s3 --> s5: required target check passes
