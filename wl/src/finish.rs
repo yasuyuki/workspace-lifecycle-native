@@ -495,6 +495,9 @@ impl Worker<'_> {
                     if let Some((check, state)) = states.iter().find(|(_, s)| matches!(s, CheckState::Failed(_))) {
                         return Err(Error::new(format!("required check {} on {commit}: {state:?}", check.name)));
                     }
+                    if let Some((check, CheckState::Unfinalized(detail))) = states.iter().find(|(_, s)| matches!(s, CheckState::Unfinalized(_))) {
+                        return Err(Error::new(format!("required check {} on {commit} will not finish: {detail}, then finish again", check.name)));
+                    }
                     if states.iter().all(|(_, s)| *s == CheckState::Succeeded) {
                         return Ok(());
                     }
@@ -560,6 +563,7 @@ enum CheckState {
     Pending,
     Succeeded,
     Failed(String),
+    Unfinalized(String),
 }
 
 fn github_slug(url: &str) -> Option<String> {
@@ -622,6 +626,13 @@ fn check_states<'a>(github: &GitHub, slug: &str, sha: &str, checks: &'a [Require
                 .max_by_key(|r| r["id"].as_u64().unwrap_or(0));
             let state = match latest {
                 None => CheckState::Pending,
+                // GitHub can record the result and leave the status behind; such a run never finishes (#6).
+                Some(run) if run["status"] != "completed" && run["conclusion"].is_string() && run["completed_at"].is_string() => CheckState::Unfinalized(format!(
+                    "GitHub left it {} with conclusion {}; rerun it with gh run rerun -R {slug} --job {}",
+                    run["status"].as_str().unwrap_or(""),
+                    run["conclusion"].as_str().unwrap_or(""),
+                    run["id"]
+                )),
                 Some(run) if run["status"] != "completed" => CheckState::Pending,
                 Some(run) if run["conclusion"] == "success" => CheckState::Succeeded,
                 Some(run) => CheckState::Failed(format!("{} {}", run["conclusion"], run["html_url"])),

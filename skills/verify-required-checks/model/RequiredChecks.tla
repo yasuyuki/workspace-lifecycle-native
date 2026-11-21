@@ -11,8 +11,9 @@ Init ==
     /\ retries = 0
     /\ ignoredWorkflowFailure = FALSE
 
-Replies == {"missing", "other app passed", "latest pending", "failed", "passed"}
+Replies == {"missing", "other app passed", "latest pending", "failed", "unfinalized", "passed"}
 IsSuccess(reply) == reply = "passed"
+Stops(reply) == reply \in {"failed", "unfinalized"}
 SelectSuccess(reply) == IsSuccess(reply) \/ (TrustOtherApp /\ reply = "other app passed")
 
 PollTopic ==
@@ -21,7 +22,7 @@ PollTopic ==
     /\ \E reply \in Replies:
         /\ topic' = reply
         /\ stage' = CASE SelectSuccess(reply) -> "topic checked"
-                      [] reply = "failed" -> "topic failed"
+                      [] Stops(reply) -> "topic failed"
                       [] OTHER -> "prepared"
     /\ UNCHANGED <<target, retries, ignoredWorkflowFailure>>
 
@@ -42,7 +43,7 @@ PollTarget ==
     /\ \E reply \in Replies:
         /\ target' = reply
         /\ stage' = CASE SelectSuccess(reply) -> "integrated"
-                      [] reply = "failed" -> "target failed"
+                      [] Stops(reply) -> "target failed"
                       [] OTHER -> "target pushed"
     /\ UNCHANGED <<topic, retries, ignoredWorkflowFailure>>
 

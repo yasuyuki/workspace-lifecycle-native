@@ -272,6 +272,17 @@ fn any_command_restarts_a_finish_whose_worker_is_gone() {
 #[cfg(unix)]
 #[test]
 fn the_target_waits_for_required_checks_and_a_failed_check_needs_action() {
+    a_required_check_needs_action("failure", &["required check test"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_concluded_check_github_never_completed_needs_action_with_its_rerun() {
+    a_required_check_needs_action("unfinalized", &["required check test", "will not finish", "gh run rerun -R example/product --job 1"]);
+}
+
+#[cfg(unix)]
+fn a_required_check_needs_action(last: &str, details: &[&str]) {
     use std::os::unix::fs::PermissionsExt;
     let checks = r#"[{"app": "github-actions", "name": "test"}]"#;
     let f = Fixture::new(None);
@@ -308,6 +319,8 @@ fn the_target_waits_for_required_checks_and_a_failed_check_needs_action() {
                 let c = conclusion.lock().unwrap().clone();
                 let body = if c.is_empty() {
                     r#"{"check_runs":[]}"#.to_owned()
+                } else if c == "unfinalized" {
+                    r#"{"check_runs":[{"id":1,"name":"test","app":{"slug":"github-actions"},"status":"in_progress","conclusion":"success","completed_at":"2026-11-20T23:29:51Z","html_url":"u"}]}"#.to_owned()
                 } else {
                     format!(r#"{{"check_runs":[{{"id":1,"name":"test","app":{{"slug":"github-actions"}},"status":"completed","conclusion":"{c}","html_url":"u"}}]}}"#)
                 };
@@ -326,12 +339,13 @@ fn the_target_waits_for_required_checks_and_a_failed_check_needs_action() {
     run(&["finish", "alpha"]);
     std::thread::sleep(Duration::from_secs(3));
     assert_eq!(f.origin_main(), before, "nothing reaches the target while the check is pending");
-    *conclusion.lock().unwrap() = "failure".to_owned();
+    *conclusion.lock().unwrap() = last.to_owned();
     let start = Instant::now();
     loop {
         let status = run(&["status", "alpha"]);
         if status["tasks"][0]["finish"]["stage"] == "needs-action" {
-            assert!(status["tasks"][0]["finish"]["detail"].as_str().unwrap().contains("required check test"), "{status}");
+            let detail = status["tasks"][0]["finish"]["detail"].as_str().unwrap();
+            assert!(details.iter().all(|d| detail.contains(d)), "{status}");
             break;
         }
         assert!(start.elapsed() < Duration::from_secs(60), "{status}");

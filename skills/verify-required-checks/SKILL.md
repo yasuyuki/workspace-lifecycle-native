@@ -16,7 +16,7 @@ Use [TLA+ Tools v1.7.4](https://github.com/tlaplus/tlaplus/releases/tag/v1.7.4),
 
 | Config | Expected result at the sync commit |
 | --- | --- |
-| [RequiredChecks.cfg](model/RequiredChecks.cfg) | 24 states. Both rules hold for check-run responses. |
+| [RequiredChecks.cfg](model/RequiredChecks.cfg) | 28 states. Both rules hold for check-run responses. |
 | [failed-suite.cfg](model/failed-suite.cfg) | `WorkflowFailureStopsNextPoll` breaks. One poll sees no matching run and leaves the task prepared. |
 | [wrong-app.cfg](model/wrong-app.cfg) | Deliberate mutation. `OnlyRequiredChecksAdvance` breaks when an unrelated app's success clears the topic gate. |
 
@@ -30,8 +30,8 @@ Sync commit `0ea2eb4c86a18680acbe0097b0d5d7b1d86f5ec2`. All entry points below l
 
 | Source | Model |
 | --- | --- |
-| `check_states` selects the greatest run ID for the required app/name, then examines status and conclusion. | `Replies`, `IsSuccess`. The replies stand for selected-run outcomes, including only an unrelated success or a newer pending run. |
-| `wait_for_checks` succeeds on all required checks, errors on a failed check, and keeps polling on missing or incomplete runs. | `PollTopic`, `PollTarget`, `PollEmptyFailedSuite`. The latter represents a failed workflow as seen from the existing check-runs query. |
+| `check_states` selects the greatest run ID for the required app/name, then examines status and conclusion. A run that has a conclusion and `completed_at` but another status is unfinalized ([#6](https://github.com/yasuyuki/workspace-lifecycle-native/issues/6)). | `Replies`, `IsSuccess`, `Stops`. The replies stand for selected-run outcomes, including only an unrelated success, a newer pending run, or an unfinalized run. |
+| `wait_for_checks` succeeds on all required checks, errors on a failed or unfinalized check, and keeps polling on missing or incomplete runs. | `PollTopic`, `PollTarget`, `PollEmptyFailedSuite`. The latter represents a failed workflow as seen from the existing check-runs query. |
 | `push_target` waits for the topic SHA before pushing. `Worker::step` at `TargetPushed` waits for the pushed SHA. | `PushTarget` and the two separate gate states. |
 | `work` stores `NeedsAction` after an error. `finish` accepts a new attempt after the old one ends. | Failure transitions and `Retry`. |
 
