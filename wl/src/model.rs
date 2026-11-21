@@ -32,6 +32,34 @@ impl TaskName {
     pub fn as_str(&self) -> &str { &self.0 }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(try_from = "String", into = "String")]
+pub struct FinishId(String);
+
+impl TryFrom<String> for FinishId {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        let valid = !value.is_empty()
+            && value.len() <= 128
+            && !value.starts_with(['.', '-'])
+            && !value.ends_with(".lock")
+            && value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'));
+        if valid { Ok(Self(value)) } else { Err(format!("invalid finish id: {value:?}")) }
+    }
+}
+
+impl From<FinishId> for String {
+    fn from(id: FinishId) -> String { id.0 }
+}
+
+impl fmt::Display for FinishId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(&self.0) }
+}
+
+impl FinishId {
+    pub fn as_str(&self) -> &str { &self.0 }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum TaskStage {
@@ -75,6 +103,8 @@ pub const PREPARING: &str = "#prepare";
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Acceptance {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<FinishId>,
     pub task: TaskName,
     pub attempt: u32,
     pub commit: String,
@@ -123,9 +153,50 @@ pub struct Progress {
     pub uncommitted: Option<bool>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct FinishRun {
+    pub version: u32,
+    pub id: FinishId,
+    pub task: TaskName,
+    pub attempt: u32,
+    pub commit: String,
+    pub target: String,
+    pub retire: bool,
+    pub accepted_at_ms: u128,
+    pub stage: Stage,
+    pub merged: Option<String>,
+    pub target_base: Option<String>,
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub uncommitted: Option<bool>,
+}
+
+impl FinishRun {
+    pub fn from_acceptance(id: FinishId, acceptance: &Acceptance, progress: Option<&Progress>) -> Self {
+        let progress = progress.filter(|p| p.attempt == acceptance.attempt);
+        Self {
+            version: VERSION,
+            id,
+            task: acceptance.task.clone(),
+            attempt: acceptance.attempt,
+            commit: acceptance.commit.clone(),
+            target: acceptance.target.clone(),
+            retire: acceptance.retire,
+            accepted_at_ms: acceptance.accepted_at_ms,
+            stage: progress.map_or(Stage::Accepted, |p| p.stage),
+            merged: progress.and_then(|p| p.merged.clone()),
+            target_base: progress.and_then(|p| p.target_base.clone()),
+            detail: progress.and_then(|p| p.detail.clone()),
+            uncommitted: progress.and_then(|p| p.uncommitted),
+        }
+    }
+}
+
 /// Created by the worker; the next command that reports it deletes it.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Notice {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<FinishId>,
     pub task: TaskName,
     pub attempt: u32,
     pub stage: Stage,

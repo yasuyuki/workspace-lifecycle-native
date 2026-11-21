@@ -13,7 +13,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage:
   wl [--repo PATH] begin TASK --request URL [--branch NAME] [--target BRANCH] [--base REV]
-  wl [--repo PATH] status [TASK]
+  wl [--repo PATH] status [TASK] [--finish ID]
   wl [--repo PATH] hold TASK --reason TEXT
   wl [--repo PATH] release-hold TASK --decision REF
   wl [--repo PATH] finish TASK [--retire]

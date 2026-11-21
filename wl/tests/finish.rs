@@ -117,6 +117,23 @@ impl Fixture {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
+
+    fn wait_for_finish(&self, id: &str, stage: &str) -> Value {
+        let start = Instant::now();
+        loop {
+            let status = self.wl(&["status", "--finish", id]);
+            assert_eq!(status["ok"], true, "{status}");
+            let observed = status["finish"]["stage"].as_str();
+            if observed == Some(stage) {
+                return status;
+            }
+            if observed == Some("needs-action") && stage != "needs-action" {
+                panic!("finish {id} entered needs-action while waiting for {stage}: {status}");
+            }
+            assert!(start.elapsed() < Duration::from_secs(90), "finish {id} did not reach {stage}: {status}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
 }
 
 #[test]
@@ -558,4 +575,139 @@ fn a_restarted_worker_with_an_older_timestamp_does_not_overlap_active_validation
     assert_disjoint_validations(&log);
     assert_eq!(git(&f.origin, &["show", "main:file_a.txt"]), "file_a");
     assert_eq!(git(&f.origin, &["show", "main:b.txt"]), "b");
+}
+
+#[test]
+fn finish_with_retire_status_by_id_reports_result_after_retirement_and_notice_drain() {
+    let f = Fixture::new(None);
+    let worktree = f.begin_with_commit("alpha", "b.txt", "b\n");
+    let commit = git(&worktree, &["rev-parse", "HEAD"]);
+    let out = f.wl(&["finish", "alpha", "--retire"]);
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(out["retire"], true, "{out}");
+    let id = out["id"].as_str().expect("finish id").to_owned();
+    assert!(!id.is_empty());
+
+    let (_, notices) = f.wait_for("alpha", "retired");
+    let notices = f.wait_for_notice("retired", notices);
+    assert!(notices.iter().any(|n| n["stage"] == "retired"), "{notices:?}");
+    let drained = f.wl(&["status"]);
+    assert!(drained.get("notices").is_none(), "{drained}");
+    assert_eq!(f.wl(&["status", "alpha"])["ok"], false);
+
+    for args in [&["status", "--finish", id.as_str()][..], &["status", "alpha", "--finish", id.as_str()]] {
+        let status = f.wl(args);
+        assert_eq!(status["ok"], true, "{args:?}: {status}");
+        let fin = &status["finish"];
+        assert_eq!(fin["id"], id.as_str());
+        assert_eq!(fin["task"], "alpha");
+        assert_eq!(fin["attempt"], 1);
+        assert_eq!(fin["commit"], commit.as_str());
+        assert_eq!(fin["merged"], commit.as_str());
+        assert_eq!(fin["target"], "main");
+        assert_eq!(fin["retire"], true);
+        assert_eq!(fin["stage"], "retired");
+        assert_eq!(fin["detail"], Value::Null);
+    }
+
+    let mismatch = f.wl(&["status", "beta", "--finish", &id]);
+    assert_eq!(mismatch["ok"], false, "{mismatch}");
+}
+
+#[test]
+fn unregistered_failed_and_reused_name_runs_are_not_treated_as_prior_success() {
+    let f = Fixture::new(None);
+    assert_eq!(f.wl(&["status", "--finish", "missing-id"])["ok"], false);
+    assert_eq!(f.wl(&["status", "--finish", "../bad"])["ok"], false);
+    assert_eq!(f.wl(&["status", "unregistered"])["ok"], false);
+
+    let wt1 = f.begin_with_commit("alpha", "b.txt", "b\n");
+    let c1 = git(&wt1, &["rev-parse", "HEAD"]);
+    let out1 = f.wl(&["finish", "alpha", "--retire"]);
+    assert_eq!(out1["ok"], true, "{out1}");
+    let id1 = out1["id"].as_str().unwrap().to_owned();
+    let s1 = f.wait_for_finish(&id1, "retired");
+    assert_eq!(s1["finish"]["commit"], c1.as_str());
+
+    let wt2 = f.wl(&["begin", "alpha", "--request", "r2"]);
+    assert_eq!(wt2["ok"], true, "{wt2}");
+    assert_eq!(wt2["finish"], Value::Null, "{wt2}");
+    std::fs::write(&f.decision, "hold").unwrap();
+    let out2 = f.wl(&["finish", "alpha", "--retire"]);
+    assert_eq!(out2["ok"], true, "{out2}");
+    let id2 = out2["id"].as_str().unwrap().to_owned();
+    assert_ne!(id2, id1);
+    let s2 = f.wait_for_finish(&id2, "needs-action");
+    assert!(s2["finish"]["detail"].as_str().unwrap().contains("hold"), "{s2}");
+
+    assert_eq!(f.wl(&["retire", "alpha"])["ok"], true);
+    assert_eq!(f.wl(&["status", "alpha"])["ok"], false);
+    assert_eq!(f.wl(&["status", "--finish", &id2])["finish"]["stage"], "needs-action");
+    let s1_after = f.wl(&["status", "--finish", &id1]);
+    assert_eq!(s1_after["finish"]["stage"], "retired");
+    assert_eq!(s1_after["finish"]["commit"], c1.as_str());
+
+    std::fs::write(&f.decision, "push").unwrap();
+    let wt3 = f.begin_with_commit("alpha", "c.txt", "c\n");
+    let c3 = git(&wt3, &["rev-parse", "HEAD"]);
+    let out3 = f.wl(&["finish", "alpha", "--retire"]);
+    assert_eq!(out3["ok"], true, "{out3}");
+    let id3 = out3["id"].as_str().unwrap().to_owned();
+    assert!(id3 != id1 && id3 != id2);
+    let s3 = f.wait_for_finish(&id3, "retired");
+    assert_eq!(s3["finish"]["commit"], c3.as_str());
+    assert_eq!(s3["finish"]["merged"], c3.as_str());
+}
+
+#[test]
+fn crashed_retire_after_task_delete_finalizes_run_on_next_status_and_before_rebegin() {
+    let f = Fixture::new(None);
+    let simulate_crash = |task: &str, file: &str, content: &str| {
+        let wt = f.begin_with_commit(task, file, content);
+        let commit = git(&wt, &["rev-parse", "HEAD"]);
+        let out = f.wl(&["finish", task]);
+        assert_eq!(out["ok"], true, "{out}");
+        let id = out["id"].as_str().expect("finish id").to_owned();
+        f.wait_for(task, "integrated");
+        while f.wl(&["status"])["background"] != false {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let accept_path = f.main.join(format!(".git/wl/finishes/{task}/accept.json"));
+        let mut accept: Value = serde_json::from_slice(&std::fs::read(&accept_path).unwrap()).unwrap();
+        accept["retire"] = Value::Bool(true);
+        std::fs::write(&accept_path, serde_json::to_vec_pretty(&accept).unwrap()).unwrap();
+
+        let run_path = f.main.join(format!(".git/wl/runs/{id}.json"));
+        let mut run: Value = serde_json::from_slice(&std::fs::read(&run_path).unwrap()).unwrap();
+        run["retire"] = Value::Bool(true);
+        std::fs::write(&run_path, serde_json::to_vec_pretty(&run).unwrap()).unwrap();
+
+        std::fs::remove_file(f.main.join(format!(".git/wl/tasks/{task}.json"))).unwrap();
+        (id, commit, accept_path)
+    };
+
+    let (id1, c1, accept1) = simulate_crash("alpha", "b.txt", "b\n");
+    let st1 = f.wl(&["status", "--finish", &id1]);
+    assert_eq!(st1["ok"], true, "{st1}");
+    assert_eq!(st1["finish"]["stage"], "retired", "{st1}");
+    assert_eq!(st1["finish"]["commit"], c1.as_str());
+    assert_eq!(st1["finish"]["merged"], c1.as_str());
+    assert!(!accept1.exists(), "accept.json should be cleaned after finalizing retired finish");
+    let claims_dir = f.main.join(".git/wl/slots");
+    for entry in std::fs::read_dir(&claims_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|s| s.to_str()) == Some("claim") {
+            assert_ne!(std::fs::read_to_string(&path).unwrap(), "alpha", "claim should be released");
+        }
+    }
+
+    let (id2, c2, _) = simulate_crash("beta", "d.txt", "d\n");
+    let rebegin = f.wl(&["begin", "beta", "--request", "r2"]);
+    assert_eq!(rebegin["ok"], true, "{rebegin}");
+    assert_eq!(rebegin["finish"], Value::Null, "{rebegin}");
+    let st2 = f.wl(&["status", "--finish", &id2]);
+    assert_eq!(st2["ok"], true, "{st2}");
+    assert_eq!(st2["finish"]["stage"], "retired", "{st2}");
+    assert_eq!(st2["finish"]["commit"], c2.as_str());
 }

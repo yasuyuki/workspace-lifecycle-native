@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::model::{HoldRecord, PREPARING, SlotRecord, TaskName, TaskRecord, TaskStage, VERSION};
+use crate::model::{FinishId, HoldRecord, PREPARING, SlotRecord, TaskName, TaskRecord, TaskStage, VERSION};
 use crate::repo::{self, Layout};
 use crate::store::Store;
 use crate::Args;
@@ -186,6 +186,7 @@ pub fn begin(path: &Path, mut args: Args) -> Result<Value> {
     let ws = Workspace::open(path)?;
     crate::finish::housekeeping(&ws)?;
     let _task_lock = ws.lock_task(&task)?;
+    crate::finish::finalize_retired_finish_locked(&ws, &task)?;
     let task_path = ws.store.task(task.as_str());
     let mut record = match Store::read_json::<TaskRecord>(&task_path)? {
         Some(existing) => existing,
@@ -274,20 +275,28 @@ pub fn retire(path: &Path, mut args: Args) -> Result<Value> {
 
 /// Returns the task's slot to the free pool. Refuses anything that retiring would lose: changes in the checkout,
 /// untracked files, commits that are neither the base nor in the remote default branch, a finish still running,
-/// and with `expected_head` a checkout that moved past the commit a finish integrated.
-pub(crate) fn retire_task(ws: &Workspace, task: &TaskName, expected_head: Option<&str>) -> Result<()> {
+/// and with `finish_retire` a checkout that moved past the commit a finish integrated.
+pub(crate) fn retire_task(ws: &Workspace, task: &TaskName, finish_retire: Option<crate::finish::FinishRetire<'_>>) -> Result<()> {
     let _task_lock = ws.lock_task(task)?;
     let task_path = ws.store.task(task.as_str());
     let Some(record) = Store::read_json::<TaskRecord>(&task_path)? else {
-        ws.release_claims_for(task.as_str())?;
+        if let Some(fr) = finish_retire {
+            ws.release_claims_for(task.as_str())?;
+            crate::finish::write_retired_run(ws, fr.acceptance, Some(fr.progress))?;
+            crate::finish::clear_finish_files(ws, task)?;
+        } else {
+            crate::finish::finalize_retired_finish_locked(ws, task)?;
+            ws.release_claims_for(task.as_str())?;
+        }
         return Ok(());
     };
     if Store::read_json::<HoldRecord>(&ws.store.hold(task.as_str()))?.is_some() {
         return Err(Error::new(format!("task {task} is held; release the hold first")));
     }
-    if expected_head.is_none() && crate::finish::running(ws, task)? {
+    if finish_retire.is_none() && crate::finish::running(ws, task)? {
         return Err(Error::new(format!("task {task} has a finish in progress")));
     }
+    let expected_head = finish_retire.as_ref().map(|fr| fr.acceptance.commit.as_str());
     let n = record.slot;
     let worktree = ws.slot_path(n)?;
     if worktree.join(".git").exists() {
@@ -319,9 +328,9 @@ pub(crate) fn retire_task(ws: &Workspace, task: &TaskName, expected_head: Option
         clear_ignored(&worktree)?;
     }
     Store::remove(&ws.store.hold(task.as_str()))?;
-    Store::remove(&ws.store.acceptance(task.as_str()))?;
-    Store::remove(&ws.store.progress(task.as_str()))?;
-    let _ = std::fs::remove_dir(ws.store.finishes_dir().join(task.as_str()));
+    if finish_retire.is_none() {
+        crate::finish::clear_finish_files(ws, task)?;
+    }
     {
         // Keep the claim until retirement is recorded. Once the task file is removed,
         // orphan recovery can finish releasing the claim with the same order.
@@ -344,6 +353,10 @@ pub(crate) fn retire_task(ws: &Workspace, task: &TaskName, expected_head: Option
             Store::remove(&ws.store.claim(n))?;
         }
     }
+    if let Some(fr) = finish_retire {
+        crate::finish::write_retired_run(ws, fr.acceptance, Some(fr.progress))?;
+        crate::finish::clear_finish_files(ws, task)?;
+    }
     spawn_detached(&ws.layout.main_worktree, &["__prepare-slot"]);
     Ok(())
 }
@@ -364,11 +377,25 @@ fn clear_ignored(worktree: &Path) -> Result<()> {
 }
 
 pub fn status(path: &Path, mut args: Args) -> Result<Value> {
+    let finish_id = args
+        .option("finish")?
+        .map(FinishId::try_from)
+        .transpose()
+        .map_err(Error::new)?;
     let only = args.optional_positional().map(TaskName::try_from).transpose().map_err(Error::new)?;
     let only_requested = only.is_some();
     args.finish()?;
     let ws = Workspace::open(path)?;
     crate::finish::housekeeping(&ws)?;
+    let total = ws.slot_numbers(".json")?.len();
+    let workers = ws.store.prepare_lock().with_file_name("");
+    let background = lock_held(&ws.store.prepare_lock())
+        || Store::list(&workers, ".lock")?.iter().any(|name| lock_held(&workers.join(format!("{name}.lock"))));
+    let slots = json!({ "total": total, "free": ws.free_slots()?.len() });
+    if let Some(id) = finish_id {
+        let finish = crate::finish::finish_status(&ws, &id, only.as_ref())?;
+        return Ok(json!({ "finish": finish, "slots": slots, "background": background }));
+    }
     let names = match only {
         Some(task) => vec![task],
         None => Store::list(&ws.store.tasks_dir(), ".json")?
@@ -384,11 +411,7 @@ pub fn status(path: &Path, mut args: Args) -> Result<Value> {
             None => {}
         }
     }
-    let total = ws.slot_numbers(".json")?.len();
-    let workers = ws.store.prepare_lock().with_file_name("");
-    let background = lock_held(&ws.store.prepare_lock())
-        || Store::list(&workers, ".lock")?.iter().any(|name| lock_held(&workers.join(format!("{name}.lock"))));
-    Ok(json!({ "tasks": tasks, "slots": { "total": total, "free": ws.free_slots()?.len() }, "background": background }))
+    Ok(json!({ "tasks": tasks, "slots": slots, "background": background }))
 }
 
 pub(crate) fn lock_held(lock_path: &Path) -> bool {

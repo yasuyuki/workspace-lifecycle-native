@@ -24,6 +24,8 @@ impl Store {
     pub fn finishes_dir(&self) -> PathBuf { self.root.join("finishes") }
     pub fn acceptance(&self, task: &str) -> PathBuf { self.finishes_dir().join(task).join("accept.json") }
     pub fn progress(&self, task: &str) -> PathBuf { self.finishes_dir().join(task).join("progress.json") }
+    pub fn runs_dir(&self) -> PathBuf { self.root.join("runs") }
+    pub fn run(&self, id: &str) -> PathBuf { self.runs_dir().join(format!("{id}.json")) }
     pub fn worker_lock(&self, task: &str) -> PathBuf { self.root.join("workers").join(format!("{task}.lock")) }
     pub fn queue_dir(&self, target: &str) -> PathBuf { self.root.join("queue").join(target.replace('/', "%2F")) }
     pub fn task_lock(&self, task: &str) -> PathBuf { self.root.join("locks").join(format!("{task}.lock")) }

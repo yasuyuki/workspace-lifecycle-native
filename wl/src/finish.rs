@@ -2,7 +2,7 @@
 use crate::commands::{Workspace, lock_held, retire_task, spawn_detached, task_name};
 use crate::config::{self, RequiredCheck, Where};
 use crate::error::{Error, Result};
-use crate::model::{Acceptance, HoldRecord, Notice, Progress, Stage, TaskName, TaskRecord, TaskStage, VERSION};
+use crate::model::{Acceptance, FinishId, FinishRun, HoldRecord, Notice, Progress, Stage, TaskName, TaskRecord, TaskStage, VERSION};
 use crate::repo;
 use crate::store::Store;
 use crate::Args;
@@ -54,8 +54,16 @@ pub fn finish(path: &Path, mut args: Args) -> Result<Value> {
     if let Some(previous) = &previous {
         let stage = progress.as_ref().filter(|p| p.attempt == previous.attempt).map(|p| p.stage);
         if !stage.is_some_and(|s| s.is_terminal(previous.retire)) {
-            if previous.commit == commit {
-                return Ok(json!({ "task": task, "attempt": previous.attempt, "commit": commit, "accepted": true }));
+            if previous.commit == commit && previous.retire == retire {
+                return Ok(json!({
+                    "id": previous.id,
+                    "task": task,
+                    "attempt": previous.attempt,
+                    "commit": commit,
+                    "target": previous.target,
+                    "retire": previous.retire,
+                    "accepted": true,
+                }));
             }
             return Err(Error::new(format!("finish attempt {} of task {task} is still running", previous.attempt)));
         }
@@ -67,8 +75,9 @@ pub fn finish(path: &Path, mut args: Args) -> Result<Value> {
         Some(target) => target.clone(),
         None => default_branch(&slot)?,
     };
-    let acceptance = Acceptance {
+    let mut acceptance = Acceptance {
         version: VERSION,
+        id: None,
         task: task.clone(),
         attempt: previous.map_or(1, |p| p.attempt + 1),
         commit: commit.clone(),
@@ -76,17 +85,89 @@ pub fn finish(path: &Path, mut args: Args) -> Result<Value> {
         retire,
         accepted_at_ms: now_ms(),
     };
+    let run = create_run(&ws.store, &mut acceptance)?;
     Store::write_json(&ws.store.acceptance(task.as_str()), &acceptance)?;
     Store::create_new(&ws.store.queue_dir(&target).join(format!("{:020}-{task}", acceptance.accepted_at_ms)), b"")?;
     crate::trace::point("accepted");
     spawn_detached(&ws.layout.main_worktree, &["__work", task.as_str()]);
     Ok(json!({
+        "id": run.id,
         "task": task,
         "attempt": acceptance.attempt,
         "commit": commit,
         "target": target,
+        "retire": retire,
         "accepted": true,
     }))
+}
+
+fn create_run(store: &Store, acceptance: &mut Acceptance) -> Result<FinishRun> {
+    let pid = std::process::id();
+    let mut seq = 0u32;
+    loop {
+        let raw = if seq == 0 {
+            format!("{:020}-{pid}", acceptance.accepted_at_ms)
+        } else {
+            format!("{:020}-{pid}-{seq}", acceptance.accepted_at_ms)
+        };
+        let id = FinishId::try_from(raw).map_err(Error::new)?;
+        let run = FinishRun::from_acceptance(id.clone(), acceptance, None);
+        if Store::create_new_json(&store.run(id.as_str()), &run)? {
+            acceptance.id = Some(id);
+            return Ok(run);
+        }
+        seq += 1;
+    }
+}
+
+pub(crate) struct FinishRetire<'a> {
+    pub acceptance: &'a Acceptance,
+    pub progress: &'a Progress,
+}
+
+fn write_run_stage(ws: &Workspace, acceptance: &Acceptance, progress: Option<&Progress>, stage_override: Option<Stage>) -> Result<()> {
+    let Some(id) = &acceptance.id else { return Ok(()) };
+    let mut run = FinishRun::from_acceptance(id.clone(), acceptance, progress);
+    if let Some(stage) = stage_override {
+        run.stage = stage;
+        if stage == Stage::Retired {
+            run.detail = None;
+        }
+    }
+    Store::write_durable(&ws.store.run(id.as_str()), &run)
+}
+
+fn write_run(ws: &Workspace, acceptance: &Acceptance, progress: &Progress) -> Result<()> {
+    write_run_stage(ws, acceptance, Some(progress), None)
+}
+
+pub(crate) fn write_retired_run(ws: &Workspace, acceptance: &Acceptance, progress: Option<&Progress>) -> Result<()> {
+    write_run_stage(ws, acceptance, progress, Some(Stage::Retired))
+}
+
+pub(crate) fn clear_finish_files(ws: &Workspace, task: &TaskName) -> Result<()> {
+    Store::remove(&ws.store.acceptance(task.as_str()))?;
+    Store::remove(&ws.store.progress(task.as_str()))?;
+    let _ = std::fs::remove_dir(ws.store.finishes_dir().join(task.as_str()));
+    Ok(())
+}
+
+pub(crate) fn finalize_retired_finish_locked(ws: &Workspace, task: &TaskName) -> Result<()> {
+    if ws.store.task(task.as_str()).exists() {
+        return Ok(());
+    }
+    let Some(acceptance) = Store::read_json::<Acceptance>(&ws.store.acceptance(task.as_str()))? else {
+        return Ok(());
+    };
+    let progress = Store::read_json::<Progress>(&ws.store.progress(task.as_str()))?
+        .filter(|p| p.attempt == acceptance.attempt);
+    if acceptance.retire && progress.as_ref().is_some_and(|p| matches!(p.stage, Stage::Integrated | Stage::Retired)) {
+        ws.release_claims_for(task.as_str())?;
+        write_retired_run(ws, &acceptance, progress.as_ref())?;
+        clear_finish_files(ws, task)?;
+        let _ = write_notice(ws, &acceptance, Stage::Retired, None, progress.as_ref().and_then(|p| p.uncommitted));
+    }
+    Ok(())
 }
 
 /// The branch `origin/HEAD` points at.
@@ -133,6 +214,11 @@ pub(crate) fn housekeeping(ws: &Workspace) -> Result<()> {
     ws.reclaim_orphan_claims()?;
     for task in Store::list_dirs(&ws.store.finishes_dir())? {
         let Ok(task) = TaskName::try_from(task) else { continue };
+        if !ws.store.task(task.as_str()).exists() {
+            if let Some(_lock) = Store::try_lock_exclusive(&ws.store.task_lock(task.as_str()))? {
+                finalize_retired_finish_locked(ws, &task)?;
+            }
+        }
         if running(ws, &task)? && !lock_held(&ws.store.worker_lock(task.as_str())) {
             spawn_detached(&ws.layout.main_worktree, &["__work", task.as_str()]);
         }
@@ -149,18 +235,78 @@ pub(crate) fn housekeeping(ws: &Workspace) -> Result<()> {
     Ok(())
 }
 
+fn finish_value(
+    id: Option<&FinishId>,
+    task: &TaskName,
+    attempt: u32,
+    commit: &str,
+    target: &str,
+    retire: bool,
+    stage: Stage,
+    merged: Option<&str>,
+    uncommitted: Option<bool>,
+    detail: Option<&str>,
+) -> Value {
+    json!({
+        "id": id,
+        "task": task,
+        "attempt": attempt,
+        "commit": commit,
+        "target": target,
+        "retire": retire,
+        "stage": stage,
+        "merged": merged,
+        "uncommitted": uncommitted,
+        "detail": detail,
+    })
+}
+
 pub(crate) fn finish_report(ws: &Workspace, task: &TaskName) -> Result<Option<Value>> {
     let Some(acceptance) = Store::read_json::<Acceptance>(&ws.store.acceptance(task.as_str()))? else { return Ok(None) };
     let progress = Store::read_json::<Progress>(&ws.store.progress(task.as_str()))?.filter(|p| p.attempt == acceptance.attempt);
-    Ok(Some(json!({
-        "attempt": acceptance.attempt,
-        "commit": acceptance.commit,
-        "target": acceptance.target,
-        "stage": progress.as_ref().map_or(Stage::Accepted, |p| p.stage),
-        "merged": progress.as_ref().and_then(|p| p.merged.clone()),
-        "uncommitted": progress.as_ref().and_then(|p| p.uncommitted),
-        "detail": progress.and_then(|p| p.detail),
-    })))
+    Ok(Some(finish_value(
+        acceptance.id.as_ref(),
+        &acceptance.task,
+        acceptance.attempt,
+        &acceptance.commit,
+        &acceptance.target,
+        acceptance.retire,
+        progress.as_ref().map_or(Stage::Accepted, |p| p.stage),
+        progress.as_ref().and_then(|p| p.merged.as_deref()),
+        progress.as_ref().and_then(|p| p.uncommitted),
+        progress.as_ref().and_then(|p| p.detail.as_deref()),
+    )))
+}
+
+pub(crate) fn finish_status(ws: &Workspace, id: &FinishId, expected_task: Option<&TaskName>) -> Result<Value> {
+    let run = Store::read_json::<FinishRun>(&ws.store.run(id.as_str()))?
+        .ok_or_else(|| Error::new(format!("no finish {id}")))?;
+    if let Some(expected) = expected_task {
+        if run.task != *expected {
+            return Err(Error::new(format!("finish {id} belongs to task {}, not {expected}", run.task)));
+        }
+    }
+    if run.stage != Stage::Retired {
+        if let Some(acceptance) = Store::read_json::<Acceptance>(&ws.store.acceptance(run.task.as_str()))? {
+            if acceptance.id.as_ref() == Some(id) {
+                if let Some(report) = finish_report(ws, &run.task)? {
+                    return Ok(report);
+                }
+            }
+        }
+    }
+    Ok(finish_value(
+        Some(&run.id),
+        &run.task,
+        run.attempt,
+        &run.commit,
+        &run.target,
+        run.retire,
+        run.stage,
+        run.merged.as_deref(),
+        run.uncommitted,
+        run.detail.as_deref(),
+    ))
 }
 
 /// Background: drives one finish attempt to its end. One worker per task holds the task's worker lock.
@@ -195,6 +341,7 @@ pub fn work(path: &Path, mut args: Args) -> Result<Value> {
         // Retiring removed the task's finish records; writing progress back would make a later task of the same name
         // read its first attempt as already retired.
         if progress.stage != Stage::Retired {
+            write_run(&ws, &acceptance, &progress)?;
             Store::write_durable(&progress_path, &progress)?;
         }
         // Queue removal happens after durable progress is stored, so a crash beforehand cannot leave a running task unqueued.
@@ -251,7 +398,7 @@ impl Worker<'_> {
                 progress.detail = None;
             }
             Stage::Integrated => {
-                retire_task(self.ws, self.task(), Some(&self.acceptance.commit))?;
+                retire_task(self.ws, self.task(), Some(FinishRetire { acceptance: self.acceptance, progress }))?;
                 progress.stage = Stage::Retired;
             }
             Stage::Retired | Stage::NeedsAction => {}
@@ -517,22 +664,32 @@ impl Worker<'_> {
     }
 
     fn notify(&self, progress: &Progress) -> Result<()> {
-        let mut message = match progress.stage {
-            Stage::Integrated => format!("{} is integrated into {}", self.acceptance.commit, self.acceptance.target),
-            Stage::Retired => format!("{} is integrated into {} and the task is retired", self.acceptance.commit, self.acceptance.target),
-            _ => format!("needs action: {}", progress.detail.clone().unwrap_or_default()),
-        };
-        if progress.uncommitted == Some(true) && progress.stage == Stage::Integrated {
-            message.push_str("; the checkout had uncommitted changes or untracked files when the finish started, and they are not in it");
-        }
-        let notice = Notice { task: self.task().clone(), attempt: progress.attempt, stage: progress.stage, message: message.clone() };
-        let name = format!("{}-{}-{:?}.json", self.task(), progress.attempt, progress.stage);
-        Store::create_new_json(&self.ws.store.notices_dir().join(name), &notice)?;
-        if progress.stage == Stage::NeedsAction {
-            toast(&format!("wl: {}", self.task()), &message);
-        }
-        Ok(())
+        write_notice(self.ws, self.acceptance, progress.stage, progress.detail.as_deref(), progress.uncommitted)
     }
+}
+
+fn write_notice(ws: &Workspace, acceptance: &Acceptance, stage: Stage, detail: Option<&str>, uncommitted: Option<bool>) -> Result<()> {
+    let mut message = match stage {
+        Stage::Integrated => format!("{} is integrated into {}", acceptance.commit, acceptance.target),
+        Stage::Retired => format!("{} is integrated into {} and the task is retired", acceptance.commit, acceptance.target),
+        _ => format!("needs action: {}", detail.unwrap_or_default()),
+    };
+    if uncommitted == Some(true) && stage == Stage::Integrated {
+        message.push_str("; the checkout had uncommitted changes or untracked files when the finish started, and they are not in it");
+    }
+    let notice = Notice {
+        id: acceptance.id.clone(),
+        task: acceptance.task.clone(),
+        attempt: acceptance.attempt,
+        stage,
+        message: message.clone(),
+    };
+    let name = format!("{}-{}-{:?}.json", acceptance.task, acceptance.attempt, stage);
+    Store::create_new_json(&ws.store.notices_dir().join(name), &notice)?;
+    if stage == Stage::NeedsAction {
+        toast(&format!("wl: {}", acceptance.task), &message);
+    }
+    Ok(())
 }
 
 /// Runs `argv` in `dir`, appending its output to `log`; the error carries the exit status and the output's last lines.

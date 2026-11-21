@@ -31,9 +31,10 @@ Git の読取りは gix でプロセス内から行う。設定は system、appl
 |---|---|---|
 | `tasks/<task>.json` | begin と退役 | task、slot、branch、base |
 | `holds/<task>.json` | hold と release-hold | hold の理由 |
-| `finishes/<task>/accept.json` | `wl finish` | 試行の番号、確定した commit、統合先、`--retire` |
+| `finishes/<task>/accept.json` | `wl finish` | 試行の番号と実行 `id`、確定した commit、統合先、`--retire` |
 | `finishes/<task>/progress.json` | その task の worker | 試行の段階、merge commit、統合を始めた統合先の commit、needs-action の理由、worker の開始時に未 commit の変更や未追跡の file があったか |
-| `notices/<task>-<試行>-<段階>.json` | worker が作り、表示した command が消す | 統合、退役、needs-action の知らせ |
+| `runs/<id>.json` | `wl finish` とその task の worker | 実行ごとの finish の状態と結果。退役後も残る |
+| `notices/<task>-<試行>-<段階>.json` | worker が作り、表示した command が消す | 統合、退役、needs-action の知らせ（実行 `id` を含む） |
 | `slots/<n>.json` | begin と退役 | slot の path、割当て先の task または空き |
 | `queue/<target>/<受付時刻>-<task>` | finish acceptance が作り、worker が消す | 統合先ごとの受付順 |
 | `workers/<task>.lock` | worker | OS の file lock。worker が落ちると lock も外れる |
@@ -47,8 +48,8 @@ push preflight の argv は private policy の path を含むので repository �
 | command | 前景で行うこと | 想定の費用 |
 |---|---|---|
 | `wl begin <task> [--target <branch>]` | 空いている slot を選び、base から topic branch を作って切り替える。base は fetch せず、最後に fetch した `origin/HEAD`（`--target` があれば `origin/<branch>`）を使う。`--target` の branch が、その task の統合先になる。空きの slot が base にあれば ref を動かすだけで、file は書かない。空きが無くなったら、次の slot の準備を background で始める | runner で p90 46〜48 ms。空きが無いときだけ 0.3〜0.5 s（推定、まれ） |
-| `wl status` | task の state file と未読の通知を読む | runner で p90 12〜17 ms |
-| `wl finish [--retire]` | HEAD を確定した commit として記録し、受付順の file を作り、worker を起動して戻る。checkout に未 commit の変更や未追跡の file があるかは、Windows で約 20 ms かかるので worker が調べ、統合の知らせに添える | 数 ms と process の起動 |
+| `wl status [TASK] [--finish ID]` | task の state file と未読の通知を読む。`--finish ID` を指定すると退役後もその実行の結果を返す | runner で p90 12〜17 ms |
+| `wl finish [--retire]` | HEAD を確定した commit として記録し、実行 `id` と受付順の file を作り、worker を起動して戻る。checkout に未 commit の変更や未追跡の file があるかは、Windows で約 20 ms かかるので worker が調べ、統合の知らせに添える | 数 ms と process の起動 |
 | `wl hold` / `wl release-hold` | state file を書き換える | 数 ms |
 | `wl retire` | 明示の退役。slot を空きに戻す | 差分の書込み |
 
