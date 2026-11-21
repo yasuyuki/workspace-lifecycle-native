@@ -172,6 +172,28 @@ fn retire_frees_the_slot_for_the_next_begin_and_deletes_the_branch() {
 }
 
 #[test]
+fn begin_reuses_the_slot_retired_earliest() {
+    let f = fixture();
+    let alpha = wl(&f.main, &["begin", "alpha", "--request", "r"]);
+    assert_eq!(alpha["ok"], true, "{alpha}");
+    wait_for_free_slot(&f.main);
+    let beta = wl(&f.main, &["begin", "beta", "--request", "r"]);
+    assert_eq!(beta["ok"], true, "{beta}");
+    assert_ne!(alpha["worktree"], beta["worktree"]);
+    wait_for_free_slot(&f.main);
+
+    // Retire in reverse slot-number order. A prepared spare has no retirement yet.
+    assert_eq!(wl(&f.main, &["retire", "beta"])["ok"], true);
+    assert_eq!(wl(&f.main, &["retire", "alpha"])["ok"], true);
+    let gamma = wl(&f.main, &["begin", "gamma", "--request", "r"]);
+    assert_eq!(gamma["worktree"], beta["worktree"], "{gamma}");
+
+    assert_eq!(wl(&f.main, &["retire", "gamma"])["ok"], true);
+    let delta = wl(&f.main, &["begin", "delta", "--request", "r"]);
+    assert_eq!(delta["worktree"], alpha["worktree"], "{delta}");
+}
+
+#[test]
 fn retire_refuses_to_lose_work_or_a_held_task() {
     let f = fixture();
     let out = wl(&f.main, &["begin", "alpha", "--request", "r"]);

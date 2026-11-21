@@ -21,8 +21,23 @@ _Avoid_: 引継ぎ、Linux への移行、Linux session
 _Avoid_: offload、委譲
 
 **Legacy lifecycle**:
-置き換える前の Python の workspace-lifecycle の install。切替の前に始めた task だけを、完了か退役まで扱う。
+置き換える前の Python の workspace-lifecycle の install。切替の前に始めた task を完了か退役まで扱う。push 判定と agent-runtime の workspace binding が参照する間も install を保持する。
 _Avoid_: 旧版、互換層
+
+**Task hold**:
+`wl hold` で task を保留すること。`wl release-hold` に判断の参照を渡して解除するまで、finish や退役を止める。
+
+**Push decision: hold**:
+push preflight が、評価した push を見送ると判断した結果。
+
+**Owner hold**:
+本人が Issue に記録する、作業または判断の保留。
+
+**Target integration**:
+受入済みの成果が task の統合先の remote branch に届き、必要な検証を終えたこと。
+
+**Default integration**:
+受入済みの成果が repository の remote default branch に届いたこと。Issue を閉じる前に確認する。統合先が feature branch のときは、その成果を default branch へ届ける工程が別にある。
 
 **Finish acceptance**:
 `finish` が、呼ばれた時点の commit を task の統合対象として確定し、background work を始めて戻ること。確定した後に積まれた commit は、次の finish の対象になる。
@@ -49,7 +64,7 @@ worker が自力で進められなくなった finish の状態。統合先を�
 _Avoid_: 失敗、待機、pending
 
 **Slot**:
-repository ごとに持つ、path が固定された再利用の checkout。begin は空いている slot を一つの task に割り当て、退役はその slot を空きに戻す。task より長く残る。
+repository ごとに持つ、path が固定された再利用の checkout。begin は空いている slot を一つの task に割り当て、退役はその slot を空きに戻す。退役時点が分かる空き slot は、古く退役した順に割り当てる。task より長く残る。
 _Avoid_: task checkout の作成、worktree の新規作成
 
 **Slot cache**:

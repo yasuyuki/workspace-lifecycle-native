@@ -20,6 +20,7 @@ impl Store {
     pub fn task(&self, task: &str) -> PathBuf { self.tasks_dir().join(format!("{task}.json")) }
     pub fn hold(&self, task: &str) -> PathBuf { self.root.join("holds").join(format!("{task}.json")) }
     pub fn slot(&self, slot: u32) -> PathBuf { self.slots_dir().join(format!("{slot}.json")) }
+    pub fn retirement_lock(&self) -> PathBuf { self.slots_dir().join("retirement.lock") }
     pub fn finishes_dir(&self) -> PathBuf { self.root.join("finishes") }
     pub fn acceptance(&self, task: &str) -> PathBuf { self.finishes_dir().join(task).join("accept.json") }
     pub fn progress(&self, task: &str) -> PathBuf { self.finishes_dir().join(task).join("progress.json") }

@@ -58,6 +58,8 @@ pub struct SlotRecord {
     pub version: u32,
     pub slot: u32,
     pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retirement_order: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

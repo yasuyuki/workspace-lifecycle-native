@@ -98,15 +98,24 @@ impl Workspace {
 
     /// Claims a slot for `owner`: one it already claimed, else a free one, else a new number.
     pub(crate) fn claim_slot(&self, owner: &str) -> Result<u32> {
+        let _lock = Store::lock_exclusive(&self.store.retirement_lock())?;
         let claims = self.slot_numbers(".claim")?;
         for &n in &claims {
             if Store::read_text(&self.store.claim(n))?.as_deref() == Some(owner) {
                 return Ok(n);
             }
         }
-        let slots = self.slot_numbers(".json")?;
-        for &n in &slots {
-            if !claims.contains(&n) && Store::create_new(&self.store.claim(n), owner.as_bytes())? {
+        let mut free = Vec::new();
+        for n in self.slot_numbers(".json")? {
+            if !claims.contains(&n) {
+                let order = Store::read_json::<SlotRecord>(&self.store.slot(n))?
+                    .and_then(|slot| slot.retirement_order);
+                free.push((order.is_none(), order, n));
+            }
+        }
+        free.sort_unstable();
+        for (_, _, n) in free {
+            if Store::create_new(&self.store.claim(n), owner.as_bytes())? {
                 return Ok(n);
             }
         }
@@ -132,7 +141,8 @@ impl Workspace {
             let target = path.to_string_lossy().into_owned();
             repo::git(&self.layout.main_worktree, &["worktree", "add", "--quiet", "--detach", &target, &base.to_string()])?;
         }
-        Store::write_json(&self.store.slot(n), &SlotRecord { version: VERSION, slot: n, path: path.clone() })?;
+        let record = SlotRecord { version: VERSION, slot: n, path: path.clone(), retirement_order: None };
+        Store::write_json(&self.store.slot(n), &record)?;
         Ok(path)
     }
 
@@ -312,9 +322,27 @@ pub(crate) fn retire_task(ws: &Workspace, task: &TaskName, expected_head: Option
     Store::remove(&ws.store.acceptance(task.as_str()))?;
     Store::remove(&ws.store.progress(task.as_str()))?;
     let _ = std::fs::remove_dir(ws.store.finishes_dir().join(task.as_str()));
-    Store::remove(&task_path)?;
-    if Store::read_text(&ws.store.claim(n))?.as_deref() == Some(task.as_str()) {
-        Store::remove(&ws.store.claim(n))?;
+    {
+        // Keep the claim until retirement is recorded. Once the task file is removed,
+        // orphan recovery can finish releasing the claim with the same order.
+        let _lock = Store::lock_exclusive(&ws.store.retirement_lock())?;
+        let slot_path = ws.store.slot(n);
+        if let Some(mut slot) = Store::read_json::<SlotRecord>(&slot_path)? {
+            let mut last = 0;
+            for number in ws.slot_numbers(".json")? {
+                if let Some(order) = Store::read_json::<SlotRecord>(&ws.store.slot(number))?
+                    .and_then(|record| record.retirement_order)
+                {
+                    last = last.max(order);
+                }
+            }
+            slot.retirement_order = Some(last + 1);
+            Store::write_json(&slot_path, &slot)?;
+        }
+        Store::remove(&task_path)?;
+        if Store::read_text(&ws.store.claim(n))?.as_deref() == Some(task.as_str()) {
+            Store::remove(&ws.store.claim(n))?;
+        }
     }
     spawn_detached(&ws.layout.main_worktree, &["__prepare-slot"]);
     Ok(())

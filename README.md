@@ -25,6 +25,7 @@ End the offload prefix with `-e`, not `--`. After `--`, `wsl.exe` passes the com
 
 ## Verification
 
+- [Cross-tool statechart and TLA+ model](docs/cross-tool/README.md) for retirement, Issue closing, and legacy install dependencies.
 - Statecharts: [task lifecycle](docs/lifecycle-statechart.mmd), [finish and target integration](docs/lifecycle-finish-integration.mmd), [slot and claim lifecycle](docs/lifecycle-slot-claims.mmd), and [required checks](docs/lifecycle-required-checks.mmd).
 - Live CLI verification skill: [skills/verify-wl/SKILL.md](skills/verify-wl/SKILL.md) (drives the built `wl` binary with disposable repos, retained evidence, and cleanup).
 - Formal verification skills: [finish integration](skills/verify-finish-integration/SKILL.md), [slot claims](skills/verify-slot-claims/SKILL.md), and [required checks](skills/verify-required-checks/SKILL.md).
