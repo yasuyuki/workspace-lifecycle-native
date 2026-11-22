@@ -20,7 +20,7 @@ license: MIT
 
 **Harm when they break.** Two workers overwrite each other's `integrate-<target>` checkout mid-validation so unchecked code lands on `main`, a running task's queue entry is deleted early, unverified commits reach `main`, held tasks integrate, dirty/unpushed user work is erased during retirement, callers monitoring `finish --retire` lose its outcome or mistake an unrelated or failed execution for a retired run, or leftover finish files corrupt a later same-named task.
 
-## Current status at `2df5c4ac9572b3d2b45cce890ea0bc3da7901ddf`
+## Current status at `3a46d797c79915a6b13d0d09df0cc1b357e0b2d7`
 
 All six configurations (`single-task-gated`, `single-task-ungated`, `single-task-retire-reuse`, `two-tasks-crash-queue`, `two-tasks-accept-race`, `two-tasks-suffix`) pass all nine invariants (`EXPECTED` is `None` for every config). In addition to the earlier two-task findings (`49d2d43`), commit `0149b85` preserves per-run `runs/<id>.json` outcomes keyed by `FinishId` (`wl/src/finish.rs:281-310`), writes `Stage::Retired` via `write_retired_run()` after `retire_task()` deletes `tasks/<task>.json` (`wl/src/commands.rs:356-359`), and finalizes crashed `finish --retire` executions via `finalize_retired_finish_locked()` (`wl/src/finish.rs:155-171`) in `housekeeping()`, `begin()`, and absent-task `retire_task()`.
 
@@ -37,9 +37,9 @@ Empty output (or changes only inside `hold`, `release_hold`, `prepare_slot`, or 
 
 ## Coverage
 
-Sync commit: `2df5c4ac9572b3d2b45cce890ea0bc3da7901ddf` (verified after commit `0149b85`; `2df5c4a` added `retire --abandon`, which `finish --retire` does not use: it passes `abandon = false`, so only line numbers in `commands.rs` moved).
+Sync commit: `3a46d797c79915a6b13d0d09df0cc1b357e0b2d7` (verified after commit `0149b85`; `2df5c4a` added `retire --abandon`, which `finish --retire` does not use; `3a46d79` moved the push decision into `Worker::preflight()` in process, which still returns the approved remote and destination or stops, so only line numbers moved).
 
-| Code at `2df5c4a` (`wl/src/finish.rs` unless named) | Model action |
+| Code at `3a46d79` (`wl/src/finish.rs` unless named) | Model action |
 | --- | --- |
 | `finish()` validation checks, `create_run()` (`runs/<id>.json`), `Store::write_json` of `accept.json` (lines 24-89, 104-121) | `FinishWriteAccept` |
 | `finish()` `Store::create_new` of `queue/<target>/<ts>-<task>` (line 90) | `FinishEnqueue` (split when `PreemptAccept`) |
