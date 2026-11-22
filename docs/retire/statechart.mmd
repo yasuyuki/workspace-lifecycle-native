@@ -1,0 +1,56 @@
+---
+title: "wl retire and retire --abandon"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: work
+    lg1: attention
+    lg2: done
+  }
+  class lg0 blue
+  class lg1 orange
+  class lg2 teal
+  s0: すべて統合先にある
+  s1: 退役済み
+  s2: 保留中 / すべて統合先にある
+  s3: 統合せず退役済み
+  s4: 未 commit の変更あり
+  s5: 統合先に無い commit が手元だけにある
+  s6: 保留中 / 未 commit の変更あり
+  s7: 統合先に無い commit が remote topic にある
+  s8: 保留中 / 統合先に無い commit が手元だけにある
+  s9: 保留中 / 統合先に無い commit が remote topic にある
+  [*] --> s0
+  s0 --> s1: wl retire
+  s0 --> s2: wl hold
+  s0 --> s3: wl retire --abandon
+  s0 --> s4: あなたが file を変える
+  s2 --> s0: wl release-hold
+  s2 --> s6: あなたが file を変える
+  s4 --> s5: あなたが commit する
+  s4 --> s6: wl hold
+  s5 --> s0: wl finish が統合する
+  s5 --> s7: あなたが topic を push する
+  s5 --> s8: wl hold
+  s5 --> s4: あなたが file を変える
+  s6 --> s4: wl release-hold
+  s6 --> s8: あなたが commit する
+  s7 --> s0: wl finish が統合する
+  s7 --> s9: wl hold
+  s7 --> s3: wl retire --abandon
+  s7 --> s4: あなたが file を変える
+  s8 --> s5: wl release-hold
+  s8 --> s9: あなたが topic を push する
+  s8 --> s6: あなたが file を変える
+  s9 --> s7: wl release-hold
+  s9 --> s6: あなたが file を変える
+  class s0 blue
+  class s1 teal
+  class s2 orange
+  class s3 teal
+  class s4 orange
+  class s5 blue
+  class s6 orange
+  class s7 blue
+  class s8 orange
+  class s9 orange

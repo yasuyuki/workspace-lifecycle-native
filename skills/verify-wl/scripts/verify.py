@@ -51,7 +51,7 @@ EXPECTATIONS = {
     "finish-retire": "`wl finish alpha --retire` from inside the slot exits 0 with accepted=true, non-empty id, retire=true, attempt=1, commit=HEAD, target=main.",
     "integrated-and-retired": "Worker validates HEAD in integrate-main, runs preflight, pushes alpha and main, delivers one retired notice, deletes local branch alpha, keeps slot_cache `cache_keep/keep.txt`, and deletes undeclared `scratch_drop`.",
     "post-retire-finish-status": "After notice drain, `wl status alpha` exits 2 (ok=false), while `wl status --finish <id>` and `wl status alpha --finish <id>` report stage=retired on HEAD with detail=null; wrong-task and unknown `--finish` exit 2.",
-    "slot-reuse-and-name-isolation": "`wl begin beta` reuses alpha's slot path with cache_keep intact, `wl retire beta` succeeds, and re-beginning and retiring alpha starts with finish=null while keeping original `status --finish <id>` intact.",
+    "slot-reuse-and-name-isolation": "`wl begin beta` reuses alpha's slot path with cache_keep intact; with a commit off main, plain `wl retire beta` and `--abandon` before `git push origin HEAD:beta` exit 2, and `wl retire beta --abandon --decision` after the push succeeds with abandoned=true, keeping origin/beta and leaving origin/main; and re-beginning and retiring alpha starts with finish=null while keeping original `status --finish <id>` intact.",
 }
 
 NOT_RUN = [
@@ -560,14 +560,43 @@ def run_verify(repo: Path, evidence_root: Path | None = None, doctor_only: bool 
         assertion("beta reuses alpha slot", str(worktree), str(Path(beta_json["worktree"]).resolve()))
         assertion("slot_cache keep.txt survives reuse", True, (worktree / "cache_keep" / "keep.txt").is_file())
 
-        beta_retire = execute(
-            "wl retire beta",
+        (worktree / "abandoned.txt").write_text("not integrated\n", encoding="utf-8")
+        for argv in (["add", "abandoned.txt"], ["commit", "-q", "-m", "abandoned work"]):
+            assertion(f"git {argv[0]} in beta exit 0", 0, run_cmd(["git", *argv], worktree, env=drive_env).returncode)
+        beta_tip = run_cmd(["git", "rev-parse", "HEAD"], worktree, env=drive_env).stdout.strip()
+        origin_main_before_abandon = run_cmd(["git", "rev-parse", "main"], origin, env=drive_env).stdout.strip()
+
+        beta_plain_retire = execute(
+            "wl retire beta with unintegrated commit",
             [str(wl_bin), "--repo", str(product), "retire", "beta"],
             product,
             env=drive_env,
         )
-        assertion("retire beta exit 0", 0, beta_retire.returncode)
-        assertion("retire beta retired true", True, json.loads(beta_retire.stdout).get("retired"))
+        assertion("retire beta unintegrated exit 2", 2, beta_plain_retire.returncode)
+        beta_unpushed = execute(
+            "wl retire beta --abandon before topic push",
+            [str(wl_bin), "--repo", str(product), "retire", "beta", "--abandon", "--decision", "verify/abandon"],
+            product,
+            env=drive_env,
+        )
+        assertion("abandon before topic push exit 2", 2, beta_unpushed.returncode)
+        assertion("abandon before topic push names push", True, "push the topic" in json.loads(beta_unpushed.stdout).get("error", ""))
+        assertion("refused abandon keeps beta HEAD", beta_tip, run_cmd(["git", "rev-parse", "HEAD"], worktree, env=drive_env).stdout.strip())
+
+        assertion("push beta topic exit 0", 0, run_cmd(["git", "push", "-q", "origin", "HEAD:beta"], worktree, env=drive_env).returncode)
+        beta_retire = execute(
+            "wl retire beta --abandon",
+            [str(wl_bin), "--repo", str(product), "retire", "beta", "--abandon", "--decision", "verify/abandon"],
+            product,
+            env=drive_env,
+        )
+        assertion("retire beta --abandon exit 0", 0, beta_retire.returncode)
+        beta_retire_json = json.loads(beta_retire.stdout)
+        assertion("retire beta retired true", True, beta_retire_json.get("retired"))
+        assertion("retire beta abandoned true", True, beta_retire_json.get("abandoned"))
+        assertion("retire beta decision", "verify/abandon", beta_retire_json.get("decision"))
+        assertion("origin/beta keeps abandoned tip", beta_tip, run_cmd(["git", "rev-parse", "beta"], origin, env=drive_env).stdout.strip())
+        assertion("abandon leaves origin/main", origin_main_before_abandon, run_cmd(["git", "rev-parse", "main"], origin, env=drive_env).stdout.strip())
 
         alpha_rebegin = execute(
             "wl begin alpha rebegin",

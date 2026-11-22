@@ -17,7 +17,9 @@ declared `slot_cache` and undeclared ignored files, `finish --retire`, polling
 `status` and `status [TASK] --finish ID` until retirement, confirming the retired
 run stays readable by `FinishId` after notice drain while `status <task>`,
 mismatched `status <other> --finish ID`, and unknown `--finish` ID fail, slot
-reuse on a second `begin`, explicit `retire`, and task-name reuse isolation on
+reuse on a second `begin`, refusal of a plain `retire` and of `retire --abandon`
+for an unintegrated commit until its topic is pushed, then `retire --abandon
+--decision REF` leaving the target unchanged, explicit `retire`, and task-name reuse isolation on
 re-beginning the retired name. Validation and push preflight use local synthetic
 scripts; no GitHub API or WSL offload is invoked. See [the feature map](features/README.md)
 for proven scope and `not-run` surfaces.

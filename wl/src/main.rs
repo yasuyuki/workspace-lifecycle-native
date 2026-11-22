@@ -17,7 +17,7 @@ const USAGE: &str = "usage:
   wl [--repo PATH] hold TASK --reason TEXT
   wl [--repo PATH] release-hold TASK --decision REF
   wl [--repo PATH] finish TASK [--retire]
-  wl [--repo PATH] retire TASK";
+  wl [--repo PATH] retire TASK [--abandon --decision REF]";
 
 pub struct Args {
     rest: Vec<String>,

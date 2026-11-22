@@ -90,10 +90,18 @@ MUTANTS = [
     ),
     (
         "retire_task skips published commit check",
-        "wl/src/commands.rs retire_task() is_ancestor published check",
+        "wl/src/commands.rs retire_task() `!published && !abandon` refusal",
         "single-task-retire-guards",
         "NoRetireUnsafeTask",
-        "          /\\ ~unpublished[t]",
+        '          /\\ (unpublished[t] = "none" \\/ ab)',
+        "          /\\ TRUE",
+    ),
+    (
+        "retire --abandon skips the remote topic check",
+        "wl/src/commands.rs retire_task() `!published && !on_remote_topic()` refusal",
+        "single-task-retire-guards",
+        "NoRetireUnsafeTask",
+        '          /\\ unpublished[t] # "local"',
         "          /\\ TRUE",
     ),
     (

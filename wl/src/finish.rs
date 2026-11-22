@@ -398,7 +398,7 @@ impl Worker<'_> {
                 progress.detail = None;
             }
             Stage::Integrated => {
-                retire_task(self.ws, self.task(), Some(FinishRetire { acceptance: self.acceptance, progress }))?;
+                retire_task(self.ws, self.task(), Some(FinishRetire { acceptance: self.acceptance, progress }), false)?;
                 progress.stage = Stage::Retired;
             }
             Stage::Retired | Stage::NeedsAction => {}

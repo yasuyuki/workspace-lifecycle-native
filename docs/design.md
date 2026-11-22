@@ -52,6 +52,7 @@ push preflight の argv は private policy の path を含むので repository �
 | `wl finish [--retire]` | HEAD を確定した commit として記録し、実行 `id` と受付順の file を作り、worker を起動して戻る。checkout に未 commit の変更や未追跡の file があるかは、Windows で約 20 ms かかるので worker が調べ、統合の知らせに添える | 数 ms と process の起動 |
 | `wl hold` / `wl release-hold` | state file を書き換える | 数 ms |
 | `wl retire` | 明示の退役。slot を空きに戻す | 差分の書込み |
+| `wl retire --abandon --decision REF` | 統合しない task の退役。統合先に無い commit が `origin/<branch>` にあれば退役する。merge も統合先への push もしない | 差分の書込みと topic の fetch 1 回 |
 
 どの command も起動時に、lock の外れた worker を持つ未完了の finish を探す。見つかれば worker を起動し直してから本来の処理を行う。直前の command 以後の結果も先頭に出す。
 
@@ -99,6 +100,7 @@ user ごとの設定 file の `offload` に、WSL で command を実行する前
 
 - `begin` は空いている slot を割り当てる。
 - 退役は、commit されていない変更、未追跡の file、統合先に無い commit のどれかがあれば拒否する。拒否しなければ、宣言された slot cache を除く ignored data を消し、branch を消して slot を空きにする。失うものが無いときだけ退役するので、recovery copy は作らない。
+- `--abandon --decision REF` は、統合しないと決めた task を終える。統合先に無い commit は、remote から読み直した `origin/<branch>` に含まれていれば失われないので、拒否の対象から外す。含まれていなければ、topic を push するよう求めて拒否する。未 commit の変更、未追跡の file、hold、実行中の finish は、通常の退役と同じく拒否する。判断の参照は出力に返す。正本は Issue に残す。状態遷移は [docs/retire](retire/README.md) にある。
 - 空きの slot は、background の準備が `origin` を fetch したうえで最新の base へ進めておく。準備の最後に、1 秒ほど置いてから index を更新する。checkout 直後の index は全 file を「racy」として扱い、次の変更確認が全 file の内容を読むからである。
 
 ## 移行

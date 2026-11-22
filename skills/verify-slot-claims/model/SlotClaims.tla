@@ -22,7 +22,8 @@ CONSTANTS
   AllowPrepareCrash,   \* BOOLEAN: model crash/error while #prepare claim is held
   AllowRetireCrash,    \* BOOLEAN: model crash between remove(task) and remove(claim)
   AllowSameTaskRace,   \* BOOLEAN: two concurrent `wl begin a` invocations
-  AllowRetireClaimed   \* BOOLEAN: retire_task() may run concurrently with begin() (serialized by task_lock)
+  AllowRetireClaimed,  \* BOOLEAN: retire_task() may run concurrently with begin() (serialized by task_lock)
+  AllowAbandon         \* BOOLEAN: `wl retire --abandon --decision REF` may be chosen
 
 VARIABLES
   slotJson,            \* [Slots -> BOOLEAN]: slots/<n>.json exists
@@ -33,7 +34,8 @@ VARIABLES
   taskRec,             \* [Tasks -> [exists: BOOLEAN, slot: {0} \cup Slots, stage: {"none", "claimed", "ready"}]]
   hold,                \* [Tasks -> BOOLEAN]
   dirty,               \* [Tasks -> BOOLEAN]
-  unpublished,         \* [Tasks -> BOOLEAN]
+  unpublished,         \* [Tasks -> {"none", "topic", "local"}]: commits missing from the target, and whether
+                       \* origin/<branch> holds them ("topic") or only the slot does ("local")
   finishRunning,       \* [Tasks -> BOOLEAN]
   prepareLock,         \* BOOLEAN: workers/prepare.lock held
   retireLock,          \* {"none"} \cup {"a1", "a2", "b1", "a", "b"}: slots/retirement.lock owner
@@ -48,7 +50,7 @@ VARIABLES
   pPc,                 \* "idle" | "claimedExisting" | "claimedNew"
   pSlot,               \* {0} \cup Slots
   pRan,                \* BOOLEAN: prepare_slot() has completed or crashed once
-  retiredSnap,         \* [Tasks -> [checked: BOOLEAN, notHeld: BOOLEAN, clean: BOOLEAN, published: BOOLEAN, notFinishing: BOOLEAN]]
+  retiredSnap,         \* [Tasks -> [checked, notHeld, clean, published, notFinishing, skipsTarget, abandoned: BOOLEAN]]
   prepareOverwroteSlot,\* BOOLEAN: ghost flag set if prepare_slot overwrites a claimed/live slot
   badHousekeeping,     \* BOOLEAN: ghost flag if housekeeping() failed to reclaim an idle orphan/#prepare claim
   badReuseOrder        \* BOOLEAN: ghost flag if claim_slot() skipped earliest retired slot
@@ -68,7 +70,11 @@ OwnerOf(p) == IF p \in {"a1", "a2"} THEN "a" ELSE "b"
 
 SlotOrZero == {0} \cup Slots
 NoTaskRec == [exists |-> FALSE, slot |-> 0, stage |-> "none"]
-InitSnap == [checked |-> FALSE, notHeld |-> TRUE, clean |-> TRUE, published |-> TRUE, notFinishing |-> TRUE]
+InitSnap == [checked |-> FALSE, notHeld |-> TRUE, clean |-> TRUE, published |-> TRUE, notFinishing |-> TRUE,
+             skipsTarget |-> FALSE, abandoned |-> FALSE]
+
+\* retire() passes abandon only with --abandon --decision REF.
+AbandonChoices == IF AllowAbandon THEN BOOLEAN ELSE {FALSE}
 
 MinNat(S) == CHOOSE x \in S : \A y \in S : x <= y
 
@@ -111,7 +117,7 @@ Init ==
   /\ taskRec = [t \in Tasks |-> NoTaskRec]
   /\ hold = [t \in Tasks |-> FALSE]
   /\ dirty = [t \in Tasks |-> FALSE]
-  /\ unpublished = [t \in Tasks |-> FALSE]
+  /\ unpublished = [t \in Tasks |-> "none"]
   /\ finishRunning = [t \in Tasks |-> FALSE]
   /\ prepareLock = FALSE
   /\ retireLock = "none"
@@ -307,25 +313,30 @@ RetireCheckAndClean(t) ==
           /\ slotClaim' = [n \in Slots |-> IF slotClaim[n] = t THEN "none" ELSE slotClaim[n]]
           /\ UNCHANGED <<taskLock, retiredSnap, slotBranch, rSlot, rPc,
                        hold, dirty, unpublished, finishRunning>>
-     ELSE /\ (AllowRetireClaimed \/ taskRec[t].stage = "ready")
+     ELSE \E ab \in AbandonChoices :
+          /\ (AllowRetireClaimed \/ taskRec[t].stage = "ready")
           /\ ~hold[t]
           /\ ~finishRunning[t]
           /\ ~dirty[t]
-          /\ ~unpublished[t]
+          \* `!published && !abandon` refuses; `!published && !on_remote_topic()` refuses.
+          /\ (unpublished[t] = "none" \/ ab)
+          /\ unpublished[t] # "local"
           /\ LET n == taskRec[t].slot
              IN /\ taskLock' = [taskLock EXCEPT ![t] = "retire"]
                 /\ retiredSnap' = [retiredSnap EXCEPT ![t] =
                                     [checked |-> TRUE,
                                      notHeld |-> ~hold[t],
                                      clean |-> ~dirty[t],
-                                     published |-> ~unpublished[t],
-                                     notFinishing |-> ~finishRunning[t]]]
+                                     published |-> unpublished[t] # "local",
+                                     notFinishing |-> ~finishRunning[t],
+                                     skipsTarget |-> unpublished[t] # "none",
+                                     abandoned |-> ab]]
                 /\ slotBranch' = [slotBranch EXCEPT ![n] = IF slotWorktree[n] THEN "detached" ELSE slotBranch[n]]
                 /\ rSlot' = [rSlot EXCEPT ![t] = n]
                 /\ rPc' = [rPc EXCEPT ![t] = "checked"]
                 /\ hold' = [hold EXCEPT ![t] = FALSE]
                 /\ dirty' = [dirty EXCEPT ![t] = FALSE]
-                /\ unpublished' = [unpublished EXCEPT ![t] = FALSE]
+                /\ unpublished' = [unpublished EXCEPT ![t] = "none"]
                 /\ finishRunning' = [finishRunning EXCEPT ![t] = FALSE]
                 /\ UNCHANGED slotClaim
   /\ UNCHANGED <<slotJson, slotWorktree, retireOrder, taskRec, prepareLock,
@@ -510,7 +521,8 @@ ToggleDirty(t) ==
 
 ToggleUnpublished(t) ==
   /\ CanToggleRisk(t)
-  /\ unpublished' = [unpublished EXCEPT ![t] = ~unpublished[t]]
+  /\ \E v \in {"none", "topic", "local"} \ {unpublished[t]} :
+       unpublished' = [unpublished EXCEPT ![t] = v]
   /\ UNCHANGED <<slotJson, slotWorktree, slotBranch, slotClaim, retireOrder,
                taskRec, hold, dirty, finishRunning, prepareLock, retireLock,
                taskLock, bPc, bSlot, bClaimsSnap, bRuns, rPc, rSlot, rLastOrder,
@@ -605,7 +617,8 @@ NoOrphanClaimAfterHousekeeping ==
         \A n \in Slots :
           (slotClaim[n] = "#prepare" => prepareLock) \/ HasReclaimable)
 
-\* retire_task() never proceeds on a held, dirty, unpublished, or finishing task.
+\* retire_task() never proceeds on a held, dirty, or finishing task, never loses a commit that is on neither
+\* the target nor origin/<branch>, and leaves commits off the target only for `--abandon`.
 NoRetireUnsafeTask ==
   \A t \in Tasks :
     retiredSnap[t].checked =>
@@ -613,6 +626,7 @@ NoRetireUnsafeTask ==
       /\ retiredSnap[t].clean
       /\ retiredSnap[t].published
       /\ retiredSnap[t].notFinishing
+      /\ retiredSnap[t].skipsTarget => retiredSnap[t].abandoned
 
 \* Every Ready task (not mid-retire) has its slot checkout on its own branch.
 SlotBranchMatchesReadyTask ==

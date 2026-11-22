@@ -217,6 +217,39 @@ fn retire_refuses_to_lose_work_or_a_held_task() {
 }
 
 #[test]
+fn retire_abandon_ends_an_unintegrated_task_only_when_the_remote_topic_keeps_its_commits() {
+    let f = fixture();
+    let out = wl(&f.main, &["begin", "alpha", "--request", "r"]);
+    let worktree = PathBuf::from(out["worktree"].as_str().unwrap());
+    std::fs::write(worktree.join("new.txt"), "n\n").unwrap();
+    git(&worktree, &["add", "new.txt"]);
+    git(&worktree, &["commit", "-q", "-m", "work"]);
+    let tip = git(&worktree, &["rev-parse", "HEAD"]);
+    let main_before = git(&f.origin, &["rev-parse", "main"]);
+
+    let refused = wl(&f.main, &["retire", "alpha", "--abandon"]);
+    assert!(refused["error"].as_str().unwrap().contains("--decision"), "{refused}");
+    let refused = wl(&f.main, &["retire", "alpha", "--abandon", "--decision", "d"]);
+    assert!(refused["error"].as_str().unwrap().contains("push the topic"), "{refused}");
+    assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), tip, "a refused abandonment keeps the checkout");
+
+    git(&worktree, &["push", "-q", "origin", "HEAD:alpha"]);
+    wl(&f.main, &["hold", "alpha", "--reason", "keep"]);
+    assert_eq!(wl(&f.main, &["retire", "alpha", "--abandon", "--decision", "d"])["ok"], false, "a held task stays");
+    wl(&f.main, &["release-hold", "alpha", "--decision", "d"]);
+    let refused = wl(&f.main, &["retire", "alpha"]);
+    assert!(refused["error"].as_str().unwrap().contains("not in refs/remotes/origin/HEAD"), "{refused}");
+
+    let out = wl(&f.main, &["retire", "alpha", "--abandon", "--decision", "https://example.invalid/decision"]);
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(out["abandoned"], true, "{out}");
+    assert_eq!(out["decision"], "https://example.invalid/decision", "{out}");
+    assert_eq!(git(&f.origin, &["rev-parse", "alpha"]), tip, "the remote topic keeps the commits");
+    assert_eq!(git(&f.origin, &["rev-parse", "main"]), main_before, "abandoning neither merges nor pushes the target");
+    assert!(wl(&f.main, &["status"])["tasks"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn commands_run_from_inside_a_slot_find_the_same_tasks() {
     let f = fixture();
     let out = wl(&f.main, &["begin", "alpha", "--request", "r"]);

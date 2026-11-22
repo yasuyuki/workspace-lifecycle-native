@@ -262,21 +262,48 @@ fn switch_slot(mut slot: gix::Repository, worktree: &Path, branch: &str, base: g
     Ok(())
 }
 
+/// Whether `origin/<branch>`, read from the remote now, contains `tip`.
+fn on_remote_topic(worktree: &Path, branch: &str, tip: gix::ObjectId) -> Result<bool> {
+    let tracking = format!("refs/remotes/origin/{branch}");
+    if repo::git(worktree, &["fetch", "--quiet", "origin", &format!("+refs/heads/{branch}:{tracking}")]).is_err() {
+        return Ok(false);
+    }
+    let slot = repo::open_refs_only(worktree)?;
+    match repo::resolve(&slot, &tracking)? {
+        Some(remote) => repo::is_ancestor(&slot, tip, remote),
+        None => Ok(false),
+    }
+}
+
 /// Returns the task's slot to the free pool. P1 refuses anything that retiring would lose: changes in the
 /// checkout, untracked files, and commits that are neither the base nor in the remote default branch.
 pub fn retire(path: &Path, mut args: Args) -> Result<Value> {
     let task = task_name(&mut args)?;
+    let abandon = args.flag("abandon");
+    let decision = args.option("decision")?;
     args.finish()?;
+    if abandon != decision.is_some() {
+        return Err(Error::new("--abandon and --decision REF go together: the decision not to integrate the task"));
+    }
     let ws = Workspace::open(path)?;
     crate::finish::housekeeping(&ws)?;
-    retire_task(&ws, &task, None)?;
-    Ok(json!({ "task": task, "retired": true }))
+    retire_task(&ws, &task, None, abandon)?;
+    match decision {
+        Some(decision) => Ok(json!({ "task": task, "retired": true, "abandoned": true, "decision": decision })),
+        None => Ok(json!({ "task": task, "retired": true })),
+    }
 }
 
 /// Returns the task's slot to the free pool. Refuses anything that retiring would lose: changes in the checkout,
 /// untracked files, commits that are neither the base nor in the remote default branch, a finish still running,
-/// and with `finish_retire` a checkout that moved past the commit a finish integrated.
-pub(crate) fn retire_task(ws: &Workspace, task: &TaskName, finish_retire: Option<crate::finish::FinishRetire<'_>>) -> Result<()> {
+/// and with `finish_retire` a checkout that moved past the commit a finish integrated. With `abandon`, commits that
+/// are not in the target are kept when the remote topic `origin/<branch>` holds them, since nothing is then lost.
+pub(crate) fn retire_task(
+    ws: &Workspace,
+    task: &TaskName,
+    finish_retire: Option<crate::finish::FinishRetire<'_>>,
+    abandon: bool,
+) -> Result<()> {
     let _task_lock = ws.lock_task(task)?;
     let task_path = ws.store.task(task.as_str());
     let Some(record) = Store::read_json::<TaskRecord>(&task_path)? else {
@@ -319,8 +346,14 @@ pub(crate) fn retire_task(ws: &Workspace, task: &TaskName, finish_retire: Option
                     Some(into) => repo::is_ancestor(&slot, tip_id, into)?,
                     None => false,
                 };
-            if !published {
+            if !published && !abandon {
                 return Err(Error::new(format!("task {task} has commits that are not in {integrated_into}")));
+            }
+            if !published && !on_remote_topic(&worktree, &record.branch, tip_id)? {
+                return Err(Error::new(format!(
+                    "task {task} has commits that are neither in {integrated_into} nor on origin/{}; push the topic before abandoning it",
+                    record.branch
+                )));
             }
             repo::git(&worktree, &["switch", "--quiet", "--detach", &tip])?;
             slot.find_reference(branch_ref.as_str())?.delete()?;

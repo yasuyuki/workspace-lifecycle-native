@@ -13,7 +13,7 @@ license: MIT
 - `AtMostOneClaimPerTask`: no task simultaneously holds more than one `slots/<n>.claim` file.
 - `NoStalePrepareClaimWhenIdle`: when `prepare_slot()` is not running (`workers/prepare.lock` released), no slot retains `#prepare` in `slots/<n>.claim` (for crash configs, holds once `housekeeping()` runs `reclaim_orphan_claims()` via `NoOrphanClaimAfterHousekeeping`).
 - `NoOrphanClaimWhenIdle`: when no `begin`, `retire`, or `prepare_slot` operation is in progress, every `slots/<n>.claim` belongs to a live `tasks/<task>.json` pointing at slot `n` (for crash configs, enforced after `housekeeping()` / `prepare_slot()` recovery via `NoOrphanClaimAfterHousekeeping`).
-- `NoRetireUnsafeTask`: `retire_task()` never retires a task that is held, dirty/untracked, unpublished, or has a finish in progress.
+- `NoRetireUnsafeTask`: `retire_task()` never retires a task that is held, dirty/untracked, or has a finish in progress, never retires one whose commits are on neither the target nor `origin/<branch>`, and retires one whose commits are off the target only for `retire --abandon --decision REF`.
 - `SlotBranchMatchesReadyTask`: every `TaskStage::Ready` task not mid-retirement has its slot checkout on its recorded branch.
 - `UniqueRetirementOrder`: no two retired slots share the same non-zero `retirement_order`.
 - `OldestRetiredSlotReusedFirst`: `claim_slot()` picks the unclaimed free slot with the earliest non-zero `retirement_order` before any never-retired free slot.
