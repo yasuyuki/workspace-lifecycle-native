@@ -12,11 +12,11 @@ Each push builds `wl.exe` in the `ci` workflow and keeps it as the artifact `wl-
 gh run download --repo yasuyuki/workspace-lifecycle-native --name wl-windows-x64 <run id of the ci workflow for that commit>
 ```
 
-`wl` reads the push preflight and the WSL offload from `%LOCALAPPDATA%\wl\config.json`:
+`wl` reads the push policy and the WSL offload from `%LOCALAPPDATA%\wl\config.json`:
 
 ```json
 {
-  "preflight": ["<python>", "-m", "workspace_lifecycle.push", "{repo}", "--policy", "<private policy path>"],
+  "push_policy": "<private policy path>",
   "offload": { "prefix": ["wsl.exe", "-d", "<distro>", "-u", "<offload user>", "-e"], "root": "/home/<offload user>/wl-offload" }
 }
 ```

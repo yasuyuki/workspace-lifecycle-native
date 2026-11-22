@@ -408,14 +408,20 @@ impl Worker<'_> {
 
     fn preflight(&self, checkout: &Path) -> Result<(String, String)> {
         let machine = config::machine_config()?;
-        if machine.preflight.is_empty() {
-            let at = config::machine_config_path().map(|p| p.display().to_string()).unwrap_or_default();
-            return Err(Error::new(format!("no push preflight is configured in {at}")));
-        }
-        let argv: Vec<String> = machine.preflight.iter().map(|a| if a == "{repo}" { checkout.display().to_string() } else { a.clone() }).collect();
-        let output = crate::repo::command(&argv[0]).args(&argv[1..]).stdin(Stdio::null()).output().map_err(|e| Error::new(format!("cannot start the push preflight: {e}")))?;
-        let decision: Value = serde_json::from_slice(&output.stdout)
-            .map_err(|_| Error::new(format!("the push preflight did not print JSON: {}", String::from_utf8_lossy(&output.stderr).trim())))?;
+        let at = || config::machine_config_path().map(|p| p.display().to_string()).unwrap_or_default();
+        let decision: Value = match (&machine.push_policy, machine.preflight.is_empty()) {
+            (Some(policy), true) => {
+                crate::push::preflight(checkout, crate::push::Intent::Auto, false, crate::push::Oss::Auto, Some(policy))?
+            }
+            (None, false) => {
+                let argv: Vec<String> = machine.preflight.iter().map(|a| if a == "{repo}" { checkout.display().to_string() } else { a.clone() }).collect();
+                let output = crate::repo::command(&argv[0]).args(&argv[1..]).stdin(Stdio::null()).output().map_err(|e| Error::new(format!("cannot start the push preflight: {e}")))?;
+                serde_json::from_slice(&output.stdout)
+                    .map_err(|_| Error::new(format!("the push preflight did not print JSON: {}", String::from_utf8_lossy(&output.stderr).trim())))?
+            }
+            (Some(_), false) => return Err(Error::new(format!("{} sets both push_policy and preflight; keep one", at()))),
+            (None, true) => return Err(Error::new(format!("no push_policy is configured in {}", at()))),
+        };
         if decision["decision"] != "push" {
             return Err(Error::new(format!("the push preflight decided {}: {}", decision["decision"], decision["reason"])));
         }
@@ -731,7 +737,7 @@ fn github_slug(url: &str) -> Option<String> {
 
 /// The GitHub API, read in this process: a poll that started `gh` every few seconds would start a process each time,
 /// and on Windows every process start slows the foreground commands that start meanwhile.
-struct GitHub {
+pub(crate) struct GitHub {
     agent: ureq::Agent,
     api: String,
     token: String,
@@ -739,7 +745,7 @@ struct GitHub {
 
 impl GitHub {
     /// Takes the token from `gh`, once per wait. `WL_GITHUB_API` replaces the API's address, for tests.
-    fn connect() -> Result<GitHub> {
+    pub(crate) fn connect() -> Result<GitHub> {
         let output = crate::repo::command("gh")
             .args(["auth", "token"])
             .stdin(Stdio::null())
@@ -756,7 +762,7 @@ impl GitHub {
         })
     }
 
-    fn get(&self, path: &str) -> Result<Value> {
+    pub(crate) fn get(&self, path: &str) -> Result<Value> {
         let mut response = self
             .agent
             .get(format!("{}/{path}", self.api.trim_end_matches('/')))

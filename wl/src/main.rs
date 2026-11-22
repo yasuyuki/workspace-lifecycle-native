@@ -3,6 +3,7 @@ mod config;
 mod error;
 mod finish;
 mod model;
+mod push;
 mod repo;
 mod store;
 mod trace;
@@ -17,7 +18,8 @@ const USAGE: &str = "usage:
   wl [--repo PATH] hold TASK --reason TEXT
   wl [--repo PATH] release-hold TASK --decision REF
   wl [--repo PATH] finish TASK [--retire]
-  wl [--repo PATH] retire TASK [--abandon --decision REF]";
+  wl [--repo PATH] retire TASK [--abandon --decision REF]
+  wl preflight [REPO] [--user-intent auto|push|hold] [--temporary] [--oss auto|yes|no] [--policy PATH]";
 
 pub struct Args {
     rest: Vec<String>,
@@ -68,11 +70,9 @@ impl Args {
     }
 }
 
-fn run() -> Result<serde_json::Value> {
-    let mut args = Args { rest: std::env::args().skip(1).collect() };
-    let repo = args.option("repo")?.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    let command = args.positional("command")?;
-    match command.as_str() {
+fn run(repo: &std::path::Path, command: &str, args: Args) -> Result<serde_json::Value> {
+    let repo = repo.to_path_buf();
+    match command {
         "begin" => commands::begin(&repo, args),
         "status" => commands::status(&repo, args),
         "hold" => commands::hold(&repo, args),
@@ -93,7 +93,17 @@ fn main() -> ExitCode {
     trace::init();
     repo::prepare_environment();
     trace::point("environment");
-    let result = run();
+    let mut args = Args { rest: std::env::args().skip(1).collect() };
+    let parsed = args.option("repo").and_then(|repo| {
+        Ok((repo.map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")), args.positional("command")?))
+    });
+    if let Ok((repo, command)) = &parsed {
+        if command == "preflight" {
+            // Keeps the legacy preflight's output and exit status: push 0, hold 10, ask 11, usage 2.
+            return push::cli(repo, args);
+        }
+    }
+    let result = parsed.and_then(|(repo, command)| run(&repo, &command, args));
     trace::point("done");
     match result {
         Ok(mut value) => {

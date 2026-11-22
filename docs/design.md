@@ -15,7 +15,7 @@ Windows で開発 session を動かす人と agent が、task の開始から統
 | `wl.exe` | Windows | 全 command。Rust の単一実行 file（ADR 0002） |
 | worker | Windows | `wl.exe` が finish acceptance ごとに起動する、切り離された process（ADR 0006） |
 | offload 実行先 | WSL の `Ubuntu-26.04` | offload 専用の user と directory。`any` の validation 手順を走らせる（ADR 0014） |
-| push 判定 | 既存の `workspace_lifecycle.push` | worker が push の前に呼ぶ（ADR 0012） |
+| push 判定 | `wl.exe` の process 内 | worker が push の前に判定する。人と agent は `wl preflight` で同じ判定を読む（ADR 0017） |
 
 Git の読取りは gix でプロセス内から行う。設定は system、application、user の file を includes つきで読み、環境変数からの設定は読まない。Windows では gix が system の設定と attributes の場所を知るために git を起動するので、`wl` は Git の root を user ごとに `%LOCALAPPDATA%\wl\git-root` へ cache し、`EXEPATH` に入れてから開く。Git Bash は `EXEPATH` に Git の `bin` の path を入れるが、これは root ではないので、cache の root で置き換える。`wl` が起動する他の program には、呼び手の `EXEPATH` を渡す。git CLI は、push、merge、fetch、slot と integration worktree の作成・checkout・clean、未追跡の file を含む変更の確認だけに使う。ref の解決と祖先の判定は、background work でも gix で行う。Windows では、background work が process を起動している間、前景の command の起動も遅くなるからである。同じ理由で、required check の状態は GitHub API を process 内の HTTP で読む。`gh` は待ちごとに一度、token を得るためにだけ起動する。
 
@@ -41,7 +41,7 @@ Git の読取りは gix でプロセス内から行う。設定は system、appl
 
 repository が管理する宣言は `.lifecycle.toml` に置く。validation の手順と各手順の offload declaration（ADR 0007、0010）、slot cache の path（ADR 0015）である。required check は、legacy lifecycle と同じ `.github/required-checks.json` を読む。worker はどちらも確定した commit に含まれる版を読む。
 
-push preflight の argv は private policy の path を含むので repository に置かず、user ごとの設定 file（Windows は `%LOCALAPPDATA%\wl\config.json`、`WL_CONFIG` で上書き）に `{"preflight": [..., "{repo}", ...]}` として置く。
+push 判定が読む private policy の path は repository に置かず、user ごとの設定 file（Windows は `%LOCALAPPDATA%\wl\config.json`、`WL_CONFIG` で上書き）に `{"push_policy": "..."}` として置く。test は代わりに、外部の判定の argv を `{"preflight": [..., "{repo}", ...]}` として置く。両方を置くと拒否する。
 
 ## command
 
@@ -52,6 +52,7 @@ push preflight の argv は private policy の path を含むので repository �
 | `wl finish [--retire]` | HEAD を確定した commit として記録し、実行 `id` と受付順の file を作り、worker を起動して戻る。checkout に未 commit の変更や未追跡の file があるかは、Windows で約 20 ms かかるので worker が調べ、統合の知らせに添える | 数 ms と process の起動 |
 | `wl hold` / `wl release-hold` | state file を書き換える | 数 ms |
 | `wl retire` | 明示の退役。slot を空きに戻す | 差分の書込み |
+| `wl preflight [REPO] [--user-intent ...] [--temporary] [--oss ...] [--policy PATH]` | push 判定。legacy の `workspace_lifecycle.push` と同じ JSON と exit status（push 0、hold 10、ask 11）を返す。push はしない | git の読取りと GitHub API 1 回 |
 | `wl retire --abandon --decision REF` | 統合しない task の退役。統合先に無い commit が `origin/<branch>` にあれば退役する。merge も統合先への push もしない | 差分の書込みと topic の fetch 1 回 |
 
 どの command も起動時に、lock の外れた worker を持つ未完了の finish を探す。見つかれば worker を起動し直してから本来の処理を行う。直前の command 以後の結果も先頭に出す。
@@ -115,4 +116,3 @@ user ごとの設定 file の `offload` に、WSL で command を実行する前
 
 - needs-action のときに Issue へコメントする option（ADR 0006）
 - 複数の finish をまとめて統合する merge train（ADR 0011）
-- push 判定の Rust への移植（ADR 0012）

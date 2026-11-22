@@ -65,6 +65,10 @@ pub fn required_checks(repo: &gix::Repository, commit: gix::ObjectId) -> Result<
 #[derive(Deserialize, Default, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct MachineConfig {
+    /// The private default-branch push policy that `wl`'s own push decision reads.
+    #[serde(default)]
+    pub push_policy: Option<PathBuf>,
+    /// An external push preflight argv with `{repo}`, used instead of `push_policy`. Tests substitute their decision here.
     #[serde(default)]
     pub preflight: Vec<String>,
     /// Where `any` validation steps run (ADR 0007, 0014). Absent, they run on this machine.

@@ -45,7 +45,8 @@ with out_file.open("a", encoding="utf-8") as fh:
 """
 
 EXPECTATIONS = {
-    "build": "Checkout copies to scratch and `cargo build --locked -p wl` builds `wl` binary whose `help` lists begin, status, hold, release-hold, finish, retire.",
+    "build": "Checkout copies to scratch and `cargo build --locked -p wl` builds `wl` binary whose `help` lists begin, status, hold, release-hold, finish, retire, preflight.",
+    "preflight": "`wl preflight product` on the local origin exits 11 with decision=ask, `--user-intent push` exits 0 with decision=push, `--user-intent hold` exits 10 with decision=hold, and none of them pushes.",
     "begin": "`wl begin alpha` exits 0 with ok=true, stage=ready, branch=alpha, worktree under product.slots, main checkout stays on main.",
     "hold-and-refuse": "`wl hold alpha` records hold, `wl finish alpha` while held exits 2 with error mentioning held and leaves origin/main unchanged, `wl release-hold` clears hold.",
     "finish-retire": "`wl finish alpha --retire` from inside the slot exits 0 with accepted=true, non-empty id, retire=true, attempt=1, commit=HEAD, target=main.",
@@ -262,7 +263,7 @@ def run_verify(repo: Path, evidence_root: Path | None = None, doctor_only: bool 
 
         help_proc = execute("wl help", [str(wl_bin), "help"], scratch, env=drive_env)
         assertion("wl help exit 0", 0, help_proc.returncode)
-        for sub in ("begin", "status", "hold", "release-hold", "finish", "retire"):
+        for sub in ("begin", "status", "hold", "release-hold", "finish", "retire", "preflight"):
             assertion(f"help mentions {sub}", True, sub in help_proc.stdout)
 
         seed = scratch / "seed"
@@ -293,6 +294,17 @@ def run_verify(repo: Path, evidence_root: Path | None = None, doctor_only: bool 
                 raise ValueError(label + " failed")
 
         base_sha = run_cmd(["git", "rev-parse", "main"], origin, env=drive_env).stdout.strip()
+
+        # The push decision on a local origin: no hosting metadata, so the default decision asks.
+        for label, extra, code, decision in (
+            ("wl preflight", [], 11, "ask"),
+            ("wl preflight --user-intent push", ["--user-intent", "push"], 0, "push"),
+            ("wl preflight --user-intent hold", ["--user-intent", "hold"], 10, "hold"),
+        ):
+            proc = execute(label, [str(wl_bin), "preflight", str(product), *extra], product, env=drive_env)
+            assertion(f"{label} exit {code}", code, proc.returncode)
+            assertion(f"{label} decision", decision, json.loads(proc.stdout).get("decision"))
+        assertion("preflight pushed nothing", base_sha, run_cmd(["git", "rev-parse", "main"], origin, env=drive_env).stdout.strip())
 
         begin_proc = execute(
             "wl begin alpha",

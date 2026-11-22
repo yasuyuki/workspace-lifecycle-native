@@ -44,14 +44,14 @@ Sync commit: `2df5c4ac9572b3d2b45cce890ea0bc3da7901ddf` (verified after commit `
 | `finish()` validation checks, `create_run()` (`runs/<id>.json`), `Store::write_json` of `accept.json` (lines 24-89, 104-121) | `FinishWriteAccept` |
 | `finish()` `Store::create_new` of `queue/<target>/<ts>-<task>` (line 90) | `FinishEnqueue` (split when `PreemptAccept`) |
 | `housekeeping()` restart + `work()` `try_lock_exclusive` & progress load (lines 213-225, 313-333) | `WorkerStart` |
-| `Worker::step()` `Stage::Accepted` -> `push_topic()` (lines 374-380, 429-434) | `WorkerPushTopic` |
-| `wait_for_turn()`, `queue_entry_task()`, `needs_queue()` (lines 191-203, 446-467) | `WorkerWaitTurn` |
-| `prepare()` `lock_integration()` (line 503; `store.rs:32, 139`) | `WorkerPrepareAcquire` |
-| `prepare()` fetch, ancestor short-circuit, fast-forward/merge in `integrate-<target>` (lines 504-526) | `WorkerPrepareMerge` |
-| `prepare()` `.lifecycle.toml` validation run under lock (lines 529-548) | `WorkerPrepareValidate` |
-| `push_target()` topic `wait_for_checks(commit)` (line 587) | `WorkerCheckTopicCI` |
-| `push_target()` `lock_integration()` (line 591) | `WorkerPushAcquire` |
-| `push_target()` `HoldRecord`, fetch, remote tip compare, `preflight`, push (lines 588-610) | `WorkerPushTarget` |
+| `Worker::step()` `Stage::Accepted` -> `push_topic()` (lines 374-380, 435-440) | `WorkerPushTopic` |
+| `wait_for_turn()`, `queue_entry_task()`, `needs_queue()` (lines 191-203, 452-473) | `WorkerWaitTurn` |
+| `prepare()` `lock_integration()` (line 509; `store.rs:32, 139`) | `WorkerPrepareAcquire` |
+| `prepare()` fetch, ancestor short-circuit, fast-forward/merge in `integrate-<target>` (lines 510-532) | `WorkerPrepareMerge` |
+| `prepare()` `.lifecycle.toml` validation run under lock (lines 535-554) | `WorkerPrepareValidate` |
+| `push_target()` topic `wait_for_checks(commit)` (line 593) | `WorkerCheckTopicCI` |
+| `push_target()` `lock_integration()` (line 597) | `WorkerPushAcquire` |
+| `push_target()` `HoldRecord`, fetch, remote tip compare, `preflight`, push (lines 594-616) | `WorkerPushTarget` |
 | `Worker::step()` `Stage::TargetPushed` -> `leave_queue()` & `wait_for_checks(merged)` (lines 392-399) | `WorkerTargetChecks` |
 | `Worker::step()` `Stage::Integrated` -> `commands.rs` `retire_task()` safety checks & task delete (lines 400-403; `commands.rs:301-388`) | `WorkerRetireRemoveTask` |
 | `retire_task()` post-delete `write_retired_run()` (`commands.rs:389-390`; `finish.rs:128-146`) | `WorkerRetireWriteRun` |
@@ -59,7 +59,7 @@ Sync commit: `2df5c4ac9572b3d2b45cce890ea0bc3da7901ddf` (verified after commit `
 | `housekeeping()` / `begin()` / absent `retire_task()` -> `finalize_retired_finish_locked()` (`finish.rs:155-171, 217-221`; `commands.rs:188-190, 309-316`) | `HousekeepingFinalizeRetire` |
 | `commands.rs` `begin()` re-creating a retired task (`commands.rs:170-237`) | `UserRebegin` |
 | `work()` `write_run()` & `Store::write_durable(&progress_path, &progress)` (lines 341-346) | `WorkerWriteStage` |
-| `work()` post-durable `worker.leave_queue()` (lines 348-350, 469-475) | `WorkerLeaveQueue` |
+| `work()` post-durable `worker.leave_queue()` (lines 348-350, 475-481) | `WorkerLeaveQueue` |
 | Worker process termination (`worker_lock` & `integration_lock` drop, disk files stay) | `WorkerKill` |
 
 ## Run
@@ -84,10 +84,10 @@ If a run disagrees with `EXPECTED`:
 2. **Intentional contract change**: confirm against code and tests, update `EXPECTED`, the Coverage table, and the status note above, and advance the sync note only after re-running `--mutants`.
 3. **Mutant no longer caught**: either the guard/lock in `wl/src/` regressed or `MUTANTS` text in `scripts/check.py` drifted out of sync with `FinishIntegration.tla`.
 
-To confirm the check catches a real code change on a scratch copy, remove `self.lock_integration()?` in `wl/src/finish.rs` (`prepare()` line 503) and flip `WorkerPrepareAcquire` (`IF TRUE` -> `IF FALSE`) in `model/FinishIntegration.tla` to see `two-tasks-accept-race` fail `ExclusiveIntegrationWorktree`, or skip `write_retired_run` (`commands.rs:357`) and flip `WorkerRetireWriteRun` (`IF TRUE` -> `IF FALSE`) to see `single-task-retire-reuse` fail `RetiredRunMatchesExecution`, then drop the edits and re-verify exit `0`.
+To confirm the check catches a real code change on a scratch copy, remove `self.lock_integration()?` in `wl/src/finish.rs` (`prepare()` line 509) and flip `WorkerPrepareAcquire` (`IF TRUE` -> `IF FALSE`) in `model/FinishIntegration.tla` to see `two-tasks-accept-race` fail `ExclusiveIntegrationWorktree`, or skip `write_retired_run` (`commands.rs:357`) and flip `WorkerRetireWriteRun` (`IF TRUE` -> `IF FALSE`) to see `single-task-retire-reuse` fail `RetiredRunMatchesExecution`, then drop the edits and re-verify exit `0`.
 
 ## What the model leaves out
 
 - **Bounds**: 1 task with up to 1 fix commit, 3 finish attempts, and 1 external push (`single-task-gated` / `single-task-ungated`), 1 task with up to 1 re-begin after retirement (`single-task-retire-reuse`); 2 tasks with 1 commit and 1 finish attempt (`two-tasks-*`).
-- **Not modeled**: explicit `wl retire`, `--target` selection (one shared target branch is modeled), `--base`, WSL offload transport details (`tar -m` / `wl-offload`), `gh auth token` / HTTP polling retries, `wl hold` arriving concurrently *between* `push_target`'s `HoldRecord` check (`finish.rs:588`) and `git push` (`finish.rs:607`), `reset_integration_worktree` failures on ignored data, Windows toast notifications, and `notices/` removal races (`finish.rs:226-234`).
+- **Not modeled**: explicit `wl retire`, `--target` selection (one shared target branch is modeled), `--base`, WSL offload transport details (`tar -m` / `wl-offload`), `gh auth token` / HTTP polling retries, `wl hold` arriving concurrently *between* `push_target`'s `HoldRecord` check (`finish.rs:594`) and `git push` (`finish.rs:613`), `reset_integration_worktree` failures on ignored data, Windows toast notifications, and `notices/` removal races (`finish.rs:226-234`).
 - A pass holds under these stated bounds and assumptions, not for unmodeled multi-target or OS-filesystem edge cases.

@@ -12,6 +12,7 @@ and substitutes a loopback API for GitHub.
 
 Build `wl` from the selected `workspace-lifecycle-native` checkout into an isolated
 scratch directory and drive the compiled `wl` executable as a user/agent does:
+`preflight` on the local origin (ask, push and hold exit statuses, nothing pushed),
 `begin`, `hold`, `finish` refusal while held, `release-hold`, commit with
 declared `slot_cache` and undeclared ignored files, `finish --retire`, polling
 `status` and `status [TASK] --finish ID` until retirement, confirming the retired

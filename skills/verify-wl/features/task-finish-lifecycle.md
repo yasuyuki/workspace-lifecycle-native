@@ -33,7 +33,8 @@ isolated `WL_CONFIG` / `HOME` / `GIT_CONFIG_GLOBAL`.
 
 | Step | Command and inputs | Expected observation |
 | --- | --- | --- |
-| Build | `cargo build --locked -p wl` on copied checkout | Built `wl` binary exists; `wl help` exits 0 and prints `begin`, `status`, `hold`, `release-hold`, `finish`, `retire`. |
+| Build | `cargo build --locked -p wl` on copied checkout | Built `wl` binary exists; `wl help` exits 0 and prints `begin`, `status`, `hold`, `release-hold`, `finish`, `retire`, `preflight`. |
+| Push decision | `wl preflight product`, then with `--user-intent push` and `--user-intent hold` | Exit 11 with `decision: "ask"` (a local origin has no hosting metadata), exit 0 with `decision: "push"`, exit 10 with `decision: "hold"`; `origin/main` unchanged. |
 | Begin | `wl --repo product begin alpha --request verify/lifecycle` | Exit 0, `ok: true`, `stage: "ready"`, `branch: "alpha"`, `worktree` under `product.slots`, `product` remains on `main`. |
 | Hold & blocked finish | `wl --repo product hold alpha --reason "verify hold"`, then `wl --repo product finish alpha` | `hold` exits 0; `status alpha` reports `hold: "verify hold"`; `finish` exits 2 with `ok: false` and `"held"` in `error`; `origin/main` unchanged. |
 | Release hold | `wl --repo product release-hold alpha --decision verify/release` | Exit 0, `released: "verify hold"`; `status alpha` reports `hold: null`. |
