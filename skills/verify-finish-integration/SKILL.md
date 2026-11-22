@@ -20,7 +20,7 @@ license: MIT
 
 **Harm when they break.** Two workers overwrite each other's `integrate-<target>` checkout mid-validation so unchecked code lands on `main`, a running task's queue entry is deleted early, unverified commits reach `main`, held tasks integrate, dirty/unpushed user work is erased during retirement, callers monitoring `finish --retire` lose its outcome or mistake an unrelated or failed execution for a retired run, or leftover finish files corrupt a later same-named task.
 
-## Current status at `0149b853f6f8611cb12b4f06cb83215fbc8e45d7`
+## Current status at `2df5c4ac9572b3d2b45cce890ea0bc3da7901ddf`
 
 All six configurations (`single-task-gated`, `single-task-ungated`, `single-task-retire-reuse`, `two-tasks-crash-queue`, `two-tasks-accept-race`, `two-tasks-suffix`) pass all nine invariants (`EXPECTED` is `None` for every config). In addition to the earlier two-task findings (`49d2d43`), commit `0149b85` preserves per-run `runs/<id>.json` outcomes keyed by `FinishId` (`wl/src/finish.rs:281-310`), writes `Stage::Retired` via `write_retired_run()` after `retire_task()` deletes `tasks/<task>.json` (`wl/src/commands.rs:356-359`), and finalizes crashed `finish --retire` executions via `finalize_retired_finish_locked()` (`wl/src/finish.rs:155-171`) in `housekeeping()`, `begin()`, and absent-task `retire_task()`.
 
@@ -37,9 +37,9 @@ Empty output (or changes only inside `hold`, `release_hold`, `prepare_slot`, or 
 
 ## Coverage
 
-Sync commit: `0149b853f6f8611cb12b4f06cb83215fbc8e45d7` (verified after commit `0149b85`).
+Sync commit: `2df5c4ac9572b3d2b45cce890ea0bc3da7901ddf` (verified after commit `0149b85`; `2df5c4a` added `retire --abandon`, which `finish --retire` does not use: it passes `abandon = false`, so only line numbers in `commands.rs` moved).
 
-| Code at `0149b85` (`wl/src/finish.rs` unless named) | Model action |
+| Code at `2df5c4a` (`wl/src/finish.rs` unless named) | Model action |
 | --- | --- |
 | `finish()` validation checks, `create_run()` (`runs/<id>.json`), `Store::write_json` of `accept.json` (lines 24-89, 104-121) | `FinishWriteAccept` |
 | `finish()` `Store::create_new` of `queue/<target>/<ts>-<task>` (line 90) | `FinishEnqueue` (split when `PreemptAccept`) |
@@ -53,10 +53,10 @@ Sync commit: `0149b853f6f8611cb12b4f06cb83215fbc8e45d7` (verified after commit `
 | `push_target()` `lock_integration()` (line 591) | `WorkerPushAcquire` |
 | `push_target()` `HoldRecord`, fetch, remote tip compare, `preflight`, push (lines 588-610) | `WorkerPushTarget` |
 | `Worker::step()` `Stage::TargetPushed` -> `leave_queue()` & `wait_for_checks(merged)` (lines 392-399) | `WorkerTargetChecks` |
-| `Worker::step()` `Stage::Integrated` -> `commands.rs` `retire_task()` safety checks & task delete (lines 400-403; `commands.rs:279-355`) | `WorkerRetireRemoveTask` |
-| `retire_task()` post-delete `write_retired_run()` (`commands.rs:356-357`; `finish.rs:128-146`) | `WorkerRetireWriteRun` |
-| `retire_task()` `clear_finish_files()` (`commands.rs:358`; `finish.rs:148-153`) | `WorkerRetireCleanup` |
-| `housekeeping()` / `begin()` / absent `retire_task()` -> `finalize_retired_finish_locked()` (`finish.rs:155-171, 217-221`; `commands.rs:188-190, 287-290`) | `HousekeepingFinalizeRetire` |
+| `Worker::step()` `Stage::Integrated` -> `commands.rs` `retire_task()` safety checks & task delete (lines 400-403; `commands.rs:301-388`) | `WorkerRetireRemoveTask` |
+| `retire_task()` post-delete `write_retired_run()` (`commands.rs:389-390`; `finish.rs:128-146`) | `WorkerRetireWriteRun` |
+| `retire_task()` `clear_finish_files()` (`commands.rs:391`; `finish.rs:148-153`) | `WorkerRetireCleanup` |
+| `housekeeping()` / `begin()` / absent `retire_task()` -> `finalize_retired_finish_locked()` (`finish.rs:155-171, 217-221`; `commands.rs:188-190, 309-316`) | `HousekeepingFinalizeRetire` |
 | `commands.rs` `begin()` re-creating a retired task (`commands.rs:170-237`) | `UserRebegin` |
 | `work()` `write_run()` & `Store::write_durable(&progress_path, &progress)` (lines 341-346) | `WorkerWriteStage` |
 | `work()` post-durable `worker.leave_queue()` (lines 348-350, 469-475) | `WorkerLeaveQueue` |

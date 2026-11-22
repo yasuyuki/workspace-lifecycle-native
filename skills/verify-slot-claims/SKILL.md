@@ -20,13 +20,14 @@ license: MIT
 
 **Harm when they break.** Leaked `.claim` or `#prepare` files permanently remove slots from the reusable pool so `wl` keeps cloning fresh checkouts, `wl begin` / `wl retire` races detach or overwrite another task's active slot branch mid-edit, concurrent retirements collide on `retirement_order` or skip the oldest retired slot, or dirty/unpublished/held user work is erased during retirement.
 
-## Current status at `0149b853f6f8611cb12b4f06cb83215fbc8e45d7`
+## Current status at `2df5c4ac9572b3d2b45cce890ea0bc3da7901ddf`
 
-All eight configurations (`single-task-retire-guards`, `two-tasks-concurrent`, `slot-reuse-order`, `finding-begin-base-error`, `finding-prepare-crash`, `finding-retire-crash`, `finding-same-task-begin-race`, `finding-begin-retire-race`) pass all ten invariants (`EXPECTED` is `None` for every config). In addition to the five findings resolved in `dce9d18`:
+All eight configurations (`single-task-retire-guards`, `two-tasks-concurrent`, `slot-reuse-order`, `finding-begin-base-error`, `finding-prepare-crash`, `finding-retire-crash`, `finding-same-task-begin-race`, `finding-begin-retire-race`) pass all ten invariants (`EXPECTED` is `None` for every config), and all 16 mutants break their expected invariant. In addition to the five findings resolved in `dce9d18`:
 
 1. `119601a` added `SlotRecord.retirement_order` (`wl/src/commands.rs:111-116, 144, 340-349`) and `Store::retirement_lock()` (`wl/src/store.rs:23`, `commands.rs:101, 337`), so `retire_task()` assigns monotonically increasing `retirement_order` values before removing `tasks/<task>.json` and `claim(n)` and `claim_slot()` reuses the earliest-retired free slot first (`slot-reuse-order`).
 2. Note on `finding-same-task-begin-race`: because `claim_slot()` now serializes slot selection under `retirement_lock()`, omitting `task_lock` in `begin()` still fails `TaskSlotMatchesClaim` (concurrent `reclaim_orphan_task_claims()` deletes the un-locked `claim` before `BeginWriteTask` writes `tasks/<task>.json`) rather than claiming two slots.
 3. `0149b85` added `finalize_retired_finish_locked()` inside `begin()` (`commands.rs:189`), `housekeeping()` (`finish.rs:219`), and absent-task `retire_task()` (`commands.rs:288`), and `write_retired_run()` / `clear_finish_files()` after `retire_task()`'s `retirement_lock` critical section (`commands.rs:356-359`); claim/slot ownership semantics remain preserved.
+4. `2df5c4a` added `retire --abandon --decision REF` (`commands.rs:266-295`). `retire_task()` takes `abandon` and, when the tip is not in the target, accepts it only with `abandon` and only when `on_remote_topic()` finds it in `origin/<branch>` fetched from the remote (`commands.rs:349-358`). The model's `unpublished` is now `none`, `topic` or `local`, `RetireCheckAndClean` chooses `abandon` when `AllowAbandon`, and `NoRetireUnsafeTask` adds that commits off the target are left only by an abandonment. This is a promise changed on purpose (workspace-lifecycle-native#8). Old wording: never retires an unpublished task. The mutant `retire --abandon skips the remote topic check` shows the fetch-and-ancestor check is needed. `finish --retire` passes `abandon = false`, so the finish model is unchanged.
 
 ## When to use
 
@@ -41,9 +42,9 @@ Empty output (or changes only inside `hold`, `release_hold`, `status`, or `Worke
 
 ## Coverage
 
-Sync commit: `0149b853f6f8611cb12b4f06cb83215fbc8e45d7` (verified after commits `119601a` and `0149b85`).
+Sync commit: `2df5c4ac9572b3d2b45cce890ea0bc3da7901ddf` (verified after commits `119601a`, `0149b85` and `2df5c4a`).
 
-| Code at `0149b85` (`wl/src/commands.rs` unless named) | Model action |
+| Code at `2df5c4a` (`wl/src/commands.rs` unless named) | Model action |
 | --- | --- |
 | `begin()` `ws.lock_task(&task)` (`store.rs:31, 139`, `commands.rs:48-50, 188`) | `BeginAcquireLock` |
 | `begin()` `resolve_base()` before `claim_slot()`, task lookup, `retirement_lock`, initial claim scan (lines 191-196, 100-107) | `BeginResolveAndScan` / `BeginBaseError` |
@@ -51,12 +52,12 @@ Sync commit: `0149b853f6f8611cb12b4f06cb83215fbc8e45d7` (verified after commits 
 | `begin()` `Store::create_new_json(&task_path, &fresh)` (lines 198-216) | `BeginWriteTask` |
 | `begin()` `ensure_slot_checkout()` worktree add + `slots/<n>.json` (`retirement_order: None`) (lines 226, 135-147) | `BeginEnsureCheckout` |
 | `begin()` `switch_slot()` dirty check, branch switch, `write_json(Ready)` (lines 227-263) | `BeginSwitchAndReady` |
-| `retire_task()` `lock_task()`, absent-task cleanup, safety checks & clean (lines 279-333, 52-59) | `RetireCheckAndClean` |
-| `retire_task()` `retirement_lock()` acquire + max `retirement_order` scan (lines 334-347; `store.rs:23`) | `RetireReadOrder` |
-| `retire_task()` `retirement_order` write (lines 348-349) + `Store::remove(&task_path)` (line 351) | `RetireRemoveTask` |
-| `retire_task()` conditional `Store::remove(&claim(n))` + drop `retirement_lock` (lines 352-355) | `RetireRemoveClaim` / `RetireCrashAfterTaskDelete` |
-| `prepare_slot()` lock acquire, free/new `#prepare` claim creation (lines 449-490) | `PrepareClaimSlot` |
-| `prepare_slot()` checkout/fetch/settle + error-safe `Store::remove(&claim(n))` (lines 466-490) | `PrepareFinish` / `PrepareCrash` |
+| `retire()` `--abandon`/`--decision` parsing, `retire_task()` `lock_task()`, absent-task cleanup, safety checks incl. `on_remote_topic()` & clean (lines 266-295, 301-362, 52-59) | `RetireCheckAndClean` |
+| `retire_task()` `retirement_lock()` acquire + max `retirement_order` scan (lines 367-380; `store.rs:23`) | `RetireReadOrder` |
+| `retire_task()` `retirement_order` write (lines 381-382) + `Store::remove(&task_path)` (line 384) | `RetireRemoveTask` |
+| `retire_task()` conditional `Store::remove(&claim(n))` + drop `retirement_lock` (lines 385-388) | `RetireRemoveClaim` / `RetireCrashAfterTaskDelete` |
+| `prepare_slot()` lock acquire, free/new `#prepare` claim creation (lines 482-523) | `PrepareClaimSlot` |
+| `prepare_slot()` checkout/fetch/settle + error-safe `Store::remove(&claim(n))` (lines 499-523) | `PrepareFinish` / `PrepareCrash` |
 | `finish::housekeeping()` (`finish.rs:213-225`) -> `reclaim_orphan_claims()` (lines 61-97) | `HousekeepingReclaim` |
 | Concurrent `hold` / dirty worktree / unpublished commit / active finish | `ToggleHold`, `ToggleDirty`, `ToggleUnpublished`, `ToggleFinishRunning` |
 
