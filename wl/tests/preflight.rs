@@ -27,6 +27,10 @@ fn a_repository_without_a_remote_asks_and_a_hold_holds() {
     assert_eq!((code, decision["decision"].as_str()), (10, Some("hold")), "{decision}");
     let out = Command::new(env!("CARGO_BIN_EXE_wl")).args(["preflight", d, "--user-intent", "maybe"]).output().unwrap();
     assert_eq!(out.status.code(), Some(2), "invalid usage exits 2");
+    let help = Command::new(env!("CARGO_BIN_EXE_wl")).args(["preflight", "--help"]).output().unwrap();
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert_eq!(help.status.code(), Some(0));
+    assert!(text.contains("push 0, hold 10") && text.contains("--policy"), "{text}");
 }
 
 /// Runs `line` in cmd.exe on Windows and /bin/sh elsewhere.

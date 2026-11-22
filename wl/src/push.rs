@@ -716,10 +716,29 @@ pub fn preflight(repo: &Path, intent: Intent, temporary: bool, oss: Oss, policy_
     Ok(output)
 }
 
+const HELP: &str = "usage: wl preflight [REPO] [--user-intent auto|push|hold] [--temporary] [--oss auto|yes|no] [--policy PATH]
+
+Decide whether to make a normal, single-branch push without changing Git state.
+
+  REPO           target repository (default: --repo, else the current directory)
+  --user-intent  explicit user push/hold instruction; default auto applies repository and branch policy
+  --temporary    documented temporary-save intent, not inferred from a WIP subject; auto holds the push
+  --oss          explicit OSS/non-OSS classification; auto uses hosting license metadata
+  --policy       environment-supplied default-branch push policy JSON; never omit a configured file
+
+Outputs JSON decision (push/hold/ask), reason, remote and destination. Exit status: push 0, hold 10,
+ask 11; 2 is invalid usage. Only push includes push_argv; execute it in the target repository. For hold
+report the reason. For ask resolve the missing information or obtain the user's decision before running
+the preflight again. Normal Git hooks and history protections still apply.";
+
 /// `wl preflight [REPO] [--user-intent auto|push|hold] [--temporary] [--oss auto|yes|no] [--policy PATH]`. Prints one
 /// decision; exits 0 for push, 10 for hold, 11 for ask and 2 for invalid usage, so `wl preflight && git push ...`
 /// pushes nothing after hold or ask. Run the printed `push_argv` rather than a hand-written push.
 pub fn cli(repo: &Path, mut args: crate::Args) -> std::process::ExitCode {
+    if args.flag("help") {
+        println!("{HELP}");
+        return std::process::ExitCode::SUCCESS;
+    }
     let run = |args: &mut crate::Args| -> Result<Value> {
         let intent = match args.option("user-intent")?.as_deref() {
             None | Some("auto") => Intent::Auto,
