@@ -640,6 +640,14 @@ fn finish_with_retire_status_by_id_reports_result_after_retirement_and_notice_dr
         assert_eq!(fin["retire"], true);
         assert_eq!(fin["stage"], "retired");
         assert_eq!(fin["detail"], Value::Null);
+        // The time of each stage outlives the task, so the finish can be timed after retirement.
+        let stages: Vec<&str> = fin["stages"].as_array().unwrap().iter().map(|s| s["stage"].as_str().unwrap()).collect();
+        assert_eq!(stages, ["topic-pushed", "prepared", "target-pushed", "integrated", "retired"], "{fin}");
+        let mut last = fin["accepted_at_ms"].as_u64().unwrap();
+        for at in fin["stages"].as_array().unwrap().iter().map(|s| s["at_ms"].as_u64().unwrap()) {
+            assert!(at >= last, "stage times run forward: {fin}");
+            last = at;
+        }
     }
 
     let mismatch = f.wl(&["status", "beta", "--finish", &id]);

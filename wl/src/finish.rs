@@ -2,7 +2,7 @@
 use crate::commands::{Workspace, lock_held, retire_task, spawn_detached, task_name};
 use crate::config::{self, RequiredCheck, Where};
 use crate::error::{Error, Result};
-use crate::model::{Acceptance, FinishId, FinishRun, HoldRecord, Notice, Progress, Stage, TaskName, TaskRecord, TaskStage, VERSION};
+use crate::model::{Acceptance, FinishId, FinishRun, HoldRecord, Notice, Progress, Stage, StageTime, TaskName, TaskRecord, TaskStage, VERSION};
 use crate::repo;
 use crate::store::Store;
 use crate::Args;
@@ -132,6 +132,7 @@ fn write_run_stage(ws: &Workspace, acceptance: &Acceptance, progress: Option<&Pr
         run.stage = stage;
         if stage == Stage::Retired {
             run.detail = None;
+            run.stages.push(StageTime { stage, at_ms: now_ms() });
         }
     }
     Store::write_durable(&ws.store.run(id.as_str()), &run)
@@ -246,6 +247,8 @@ fn finish_value(
     merged: Option<&str>,
     uncommitted: Option<bool>,
     detail: Option<&str>,
+    accepted_at_ms: u128,
+    stages: &[StageTime],
 ) -> Value {
     json!({
         "id": id,
@@ -258,6 +261,8 @@ fn finish_value(
         "merged": merged,
         "uncommitted": uncommitted,
         "detail": detail,
+        "accepted_at_ms": accepted_at_ms,
+        "stages": stages,
     })
 }
 
@@ -275,6 +280,8 @@ pub(crate) fn finish_report(ws: &Workspace, task: &TaskName) -> Result<Option<Va
         progress.as_ref().and_then(|p| p.merged.as_deref()),
         progress.as_ref().and_then(|p| p.uncommitted),
         progress.as_ref().and_then(|p| p.detail.as_deref()),
+        acceptance.accepted_at_ms,
+        progress.as_ref().map_or(&[][..], |p| &p.stages),
     )))
 }
 
@@ -306,6 +313,8 @@ pub(crate) fn finish_status(ws: &Workspace, id: &FinishId, expected_task: Option
         run.merged.as_deref(),
         run.uncommitted,
         run.detail.as_deref(),
+        run.accepted_at_ms,
+        &run.stages,
     ))
 }
 
@@ -330,6 +339,7 @@ pub fn work(path: &Path, mut args: Args) -> Result<Value> {
             target_base: None,
             detail: None,
             uncommitted: None,
+            stages: Vec::new(),
         });
     let worker = Worker { ws: &ws, acceptance: &acceptance };
     while !progress.stage.is_terminal(acceptance.retire) {
@@ -337,6 +347,9 @@ pub fn work(path: &Path, mut args: Args) -> Result<Value> {
         if let Err(error) = worker.step(&mut progress) {
             progress.stage = Stage::NeedsAction;
             progress.detail = Some(error.to_string());
+        }
+        if progress.stage != before {
+            progress.stages.push(StageTime { stage: progress.stage, at_ms: now_ms() });
         }
         // Retiring removed the task's finish records; writing progress back would make a later task of the same name
         // read its first attempt as already retired.
