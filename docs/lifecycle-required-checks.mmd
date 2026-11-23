@@ -5,13 +5,17 @@ stateDiagram-v2
   s0: Waiting for topic checks
   s1: Needs action before target push
   s2: Topic checks passed
-  s3: Waiting for checks on pushed target
-  s4: Needs action after target push
-  s5: Integrated
+  s3: Needs action with the remote's reason
+  s4: Waiting for checks on pushed target
+  s5: Needs action after target push
+  s6: Integrated
   [*] --> s0
   s0 --> s1: required topic check fails or workflow cannot start
   s0 --> s2: required topic check passes
-  s1 --> s0: finish a corrected topic commit
-  s2 --> s3: push prepared commit to target
-  s3 --> s4: required target check fails or workflow cannot start
-  s3 --> s5: required target check passes
+  s1 --> s0: finish again after fixing the cause
+  s2 --> s3: the remote refuses the push [target unmoved]
+  s2 --> s4: push prepared commit to target
+  s2 --> s0: the target moved first, so merge and validate again
+  s3 --> s0: finish again after fixing the cause
+  s4 --> s5: required target check fails or workflow cannot start
+  s4 --> s6: required target check passes

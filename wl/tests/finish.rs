@@ -262,6 +262,39 @@ fn a_preflight_that_holds_stops_before_any_push() {
     let _ = worktree;
 }
 
+/// Branch protection refuses a push to a target that has not moved: the finish stops with the remote's reason after one
+/// validation, and finishing the same commit again integrates it once the remote accepts.
+#[test]
+fn a_target_push_the_remote_refuses_needs_action_with_its_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let count = dir.path().join("validations.txt");
+    let count_arg = count.display().to_string().replace('\\', "/");
+    let toml = format!("[[validation]]\nargv = [\"{PYTHON}\", \"-c\", \"open('{count_arg}', 'a').write('v\\\\n')\"]\n");
+    let f = Fixture::new(Some(&toml));
+    let hook = f.origin.join("hooks").join("pre-receive");
+    std::fs::write(&hook, "#!/bin/sh\nwhile read old new ref; do\n  if [ \"$ref\" = refs/heads/main ]; then\n    echo 'GH006: Protected branch update failed for refs/heads/main.' >&2\n    exit 1\n  fi\ndone\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    f.begin_with_commit("alpha", "b.txt", "b\n");
+    let before = f.origin_main();
+
+    let first = f.wl(&["finish", "alpha"]);
+    let (task, _) = f.wait_for("alpha", "needs-action");
+    let detail = task["finish"]["detail"].as_str().unwrap();
+    assert!(detail.contains("GH006"), "names the remote's reason: {detail}");
+    assert_eq!(f.origin_main(), before);
+    assert_eq!(std::fs::read_to_string(&count).unwrap().lines().count(), 1, "validates once");
+
+    std::fs::remove_file(&hook).unwrap();
+    let second = f.wl(&["finish", "alpha"]);
+    assert_eq!(second["attempt"], 2, "{first} {second}");
+    f.wait_for("alpha", "integrated");
+    assert_eq!(git(&f.origin, &["show", "main:b.txt"]), "b");
+}
+
 #[test]
 fn the_worker_decides_pushes_itself_from_the_push_policy() {
     let f = Fixture::new(None);

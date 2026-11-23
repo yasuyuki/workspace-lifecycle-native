@@ -73,7 +73,7 @@ stateDiagram-v2
     Retired --> [*]
     Accepted --> NeedsAction: 失敗
     TopicPushed --> NeedsAction: check 失敗
-    Prepared --> NeedsAction: 衝突、validation 失敗
+    Prepared --> NeedsAction: 衝突、validation 失敗、統合先が動いていないのに push が拒否された
     TargetPushed --> NeedsAction: check 失敗
     NeedsAction --> Accepted: 修正 commit の後の wl finish
 ```
@@ -83,6 +83,7 @@ stateDiagram-v2
 - 統合先ごとの順番は、受付順の file で決まる。順番を持つのは merge の準備から統合先への push までで、統合先の required check を待つ間は次の task に譲る。
 - topic の required check と、統合先での merge と validation は並行に進む。確定した commit が統合先に含まれていれば、validation はしない。
 - 統合先が先行の統合で進んだら、merge commit を作り直して validation をやり直す（ADR 0011）。
+- 統合先への push が拒否されたら、統合先を fetch し直す。統合先が進んでいれば merge から作り直す。進んでいなければ（branch protection など）、同じ push は何度でも拒否されるので、git の拒否理由を記録して needs-action にする。
 - needs-action では、integration worktree を準備前に戻し、理由を記録して worker を終える。remote の統合先は push の前なので変わらない。
 - 結果は、次の command の先頭と `wl status` に出す。needs-action のときは Windows のトースト通知も出す（ADR 0006）。
 

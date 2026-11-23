@@ -8,6 +8,7 @@ export function state({ stage, topic, target }) {
     prepared: "Waiting for topic checks",
     "topic checked": "Topic checks passed",
     "topic failed": "Needs action before target push",
+    "push refused": "Needs action with the remote's reason",
     "target pushed": "Waiting for checks on pushed target",
     "target failed": "Needs action after target push",
     integrated: "Integrated",
@@ -20,10 +21,12 @@ export function step(action, from, to) {
     PollTopic: unstarted ? "workflow cannot start"
       : to.stage === "topic checked" && to.topic !== "passed" ? "a different app reports success"
       : to.stage === "topic checked" ? "required topic check passes" : "required topic check fails",
-    PushTarget: "push prepared commit to target",
+    PushTarget: to.push === "accepted" ? "push prepared commit to target"
+      : to.push === "refused" ? "the remote refuses the push [target unmoved]"
+      : "the target moved first, so merge and validate again",
     PollTarget: unstarted ? "workflow cannot start"
       : to.stage === "integrated" ? "required target check passes" : "required target check fails",
-    Retry: "finish a corrected topic commit",
+    Retry: "finish again after fixing the cause",
     Done: "finish completes",
   }[action];
 }

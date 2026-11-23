@@ -51,7 +51,7 @@ Sync commit: `3a46d797c79915a6b13d0d09df0cc1b357e0b2d7` (verified after commit `
 | `prepare()` `.lifecycle.toml` validation run under lock (lines 535-554) | `WorkerPrepareValidate` |
 | `push_target()` topic `wait_for_checks(commit)` (line 593) | `WorkerCheckTopicCI` |
 | `push_target()` `lock_integration()` (line 597) | `WorkerPushAcquire` |
-| `push_target()` `HoldRecord`, fetch, remote tip compare, `preflight`, push (lines 594-616) | `WorkerPushTarget` |
+| `push_target()` `HoldRecord`, fetch, remote tip compare, `preflight`, push, and the refetch after a refused push (lines 594-623) | `WorkerPushTarget` |
 | `Worker::step()` `Stage::TargetPushed` -> `leave_queue()` & `wait_for_checks(merged)` (lines 392-399) | `WorkerTargetChecks` |
 | `Worker::step()` `Stage::Integrated` -> `commands.rs` `retire_task()` safety checks & task delete (lines 400-403; `commands.rs:301-388`) | `WorkerRetireRemoveTask` |
 | `retire_task()` post-delete `write_retired_run()` (`commands.rs:389-390`; `finish.rs:128-146`) | `WorkerRetireWriteRun` |
@@ -89,5 +89,5 @@ To confirm the check catches a real code change on a scratch copy, remove `self.
 ## What the model leaves out
 
 - **Bounds**: 1 task with up to 1 fix commit, 3 finish attempts, and 1 external push (`single-task-gated` / `single-task-ungated`), 1 task with up to 1 re-begin after retirement (`single-task-retire-reuse`); 2 tasks with 1 commit and 1 finish attempt (`two-tasks-*`).
-- **Not modeled**: explicit `wl retire`, `--target` selection (one shared target branch is modeled), `--base`, WSL offload transport details (`tar -m` / `wl-offload`), `gh auth token` / HTTP polling retries, `wl hold` arriving concurrently *between* `push_target`'s `HoldRecord` check (`finish.rs:594`) and `git push` (`finish.rs:613`), `reset_integration_worktree` failures on ignored data, Windows toast notifications, and `notices/` removal races (`finish.rs:226-234`).
+- **Not modeled**: explicit `wl retire`, `--target` selection (one shared target branch is modeled), `--base`, WSL offload transport details (`tar -m` / `wl-offload`), `gh auth token` / HTTP polling retries, `wl hold` arriving concurrently *between* `push_target`'s `HoldRecord` check (`finish.rs:594`) and `git push` (`finish.rs:613`), `reset_integration_worktree` failures on ignored data, a target push the remote refuses (the [required checks skill](../verify-required-checks/SKILL.md) models it: an unmoved target stops in needs-action like a preflight that holds, and changes no remote), Windows toast notifications, and `notices/` removal races (`finish.rs:226-234`).
 - A pass holds under these stated bounds and assumptions, not for unmodeled multi-target or OS-filesystem edge cases.

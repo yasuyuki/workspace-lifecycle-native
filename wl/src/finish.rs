@@ -610,7 +610,14 @@ impl Worker<'_> {
         if destination != *target {
             return Err(Error::new(format!("the push preflight chose {destination}, not {target}")));
         }
-        if repo::git(&path, &["push", "--quiet", &remote, &format!("{merged}:refs/heads/{target}")]).is_err() {
+        if let Err(refused) = repo::git(&path, &["push", "--quiet", &remote, &format!("{merged}:refs/heads/{target}")]) {
+            // Only a target that moved first calls for a new merge. A refusal of an unmoved target, such as branch
+            // protection, recurs on every push, so it stops with the remote's reason.
+            repo::git(&path, &["fetch", "--quiet", "origin", &format!("+refs/heads/{target}:refs/remotes/origin/{target}")])?;
+            let tip = repo::resolve(&repo::open_refs_only(&path)?, &format!("refs/remotes/origin/{target}"))?.map(|id| id.to_string()).unwrap_or_default();
+            if tip == remote_tip {
+                return Err(refused);
+            }
             return Ok(Stage::TopicPushed);
         }
         Ok(Stage::TargetPushed)
