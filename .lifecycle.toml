@@ -1,0 +1,4 @@
+# Read by wl from the commit a finish accepted. The required checks in
+# .github/required-checks.json build and test on GitHub runners.
+# A slot keeps its Cargo output for the next task.
+slot_cache = ["target"]
