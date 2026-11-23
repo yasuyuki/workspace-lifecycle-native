@@ -32,8 +32,8 @@ Git の読取りは gix でプロセス内から行う。設定は system、appl
 | `tasks/<task>.json` | begin と退役 | task、slot、branch、base |
 | `holds/<task>.json` | hold と release-hold | hold の理由 |
 | `finishes/<task>/accept.json` | `wl finish` | 試行の番号と実行 `id`、確定した commit、統合先、`--retire` |
-| `finishes/<task>/progress.json` | その task の worker | 試行の段階、merge commit、統合を始めた統合先の commit、needs-action の理由、worker の開始時に未 commit の変更や未追跡の file があったか |
-| `runs/<id>.json` | `wl finish` とその task の worker | 実行ごとの finish の状態と結果。退役後も残る |
+| `finishes/<task>/progress.json` | その task の worker | 試行の段階と各段階に入った時刻、merge commit、統合を始めた統合先の commit、needs-action の理由、worker の開始時に未 commit の変更や未追跡の file があったか |
+| `runs/<id>.json` | `wl finish` とその task の worker | 実行ごとの finish の状態と結果、受付と各段階の時刻。退役後も残るので、finish の区間を後から測れる |
 | `notices/<task>-<試行>-<段階>.json` | worker が作り、表示した command が消す | 統合、退役、needs-action の知らせ（実行 `id` を含む） |
 | `slots/<n>.json` | begin と退役 | slot の path、割当て先の task または空き |
 | `queue/<target>/<受付時刻>-<task>` | finish acceptance が作り、worker が消す | 統合先ごとの受付順 |

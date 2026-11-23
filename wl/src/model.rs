@@ -151,6 +151,15 @@ pub struct Progress {
     /// the accepted commit. Unknown until the worker has looked.
     #[serde(default)]
     pub uncommitted: Option<bool>,
+    /// Each stage the worker reached, in order, with the time it got there. A stage repeats when the target moved.
+    #[serde(default)]
+    pub stages: Vec<StageTime>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StageTime {
+    pub stage: Stage,
+    pub at_ms: u128,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -169,6 +178,8 @@ pub struct FinishRun {
     pub detail: Option<String>,
     #[serde(default)]
     pub uncommitted: Option<bool>,
+    #[serde(default)]
+    pub stages: Vec<StageTime>,
 }
 
 impl FinishRun {
@@ -188,6 +199,7 @@ impl FinishRun {
             target_base: progress.and_then(|p| p.target_base.clone()),
             detail: progress.and_then(|p| p.detail.clone()),
             uncommitted: progress.and_then(|p| p.uncommitted),
+            stages: progress.map(|p| p.stages.clone()).unwrap_or_default(),
         }
     }
 }
