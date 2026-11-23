@@ -257,6 +257,28 @@ fn retire_abandon_ends_an_unintegrated_task_only_when_the_remote_topic_keeps_its
 }
 
 #[test]
+fn status_reports_work_that_no_task_owns() {
+    let f = fixture();
+    let slot = PathBuf::from(wl(&f.main, &["begin", "alpha", "--request", "r"])["worktree"].as_str().unwrap().to_owned());
+    assert_eq!(wl(&f.main, &["status"])["unmanaged"], serde_json::json!([]), "slots and a clean main checkout are managed");
+
+    // Work begun by hand in the main checkout, as legacy workspace-lifecycle#37 was, and a worktree wl did not make.
+    git(&f.main, &["switch", "-q", "-c", "by-hand"]);
+    std::fs::write(f.main.join("f0.txt"), "changed\n").unwrap();
+    let foreign = f.main.parent().unwrap().join("foreign");
+    git(&f.main, &["worktree", "add", "-q", "-b", "elsewhere", foreign.to_str().unwrap()]);
+
+    let status = wl(&slot, &["status"]);
+    let unmanaged = status["unmanaged"].as_array().unwrap_or_else(|| panic!("{status}"));
+    assert_eq!(unmanaged.len(), 2, "{status}");
+    assert_eq!(unmanaged[0]["branch"], "by-hand");
+    assert_eq!(unmanaged[0]["changes"], true);
+    assert_eq!(PathBuf::from(unmanaged[0]["path"].as_str().unwrap()), f.main);
+    assert_eq!(unmanaged[1]["branch"], "elsewhere");
+    assert_eq!(PathBuf::from(unmanaged[1]["path"].as_str().unwrap()).file_name().unwrap(), "foreign");
+}
+
+#[test]
 fn commands_run_from_inside_a_slot_find_the_same_tasks() {
     let f = fixture();
     let out = wl(&f.main, &["begin", "alpha", "--request", "r"]);

@@ -444,7 +444,40 @@ pub fn status(path: &Path, mut args: Args) -> Result<Value> {
             None => {}
         }
     }
-    Ok(json!({ "tasks": tasks, "slots": slots, "background": background }))
+    if only_requested {
+        return Ok(json!({ "tasks": tasks, "slots": slots, "background": background }));
+    }
+    Ok(json!({ "tasks": tasks, "unmanaged": unmanaged(&ws)?, "slots": slots, "background": background }))
+}
+
+/// Work in this repository that no task owns, so no `wl` command would ever retire it: the main checkout when it is
+/// off the remote default branch or has changes to tracked files, and each worktree outside the slots folder.
+fn unmanaged(ws: &Workspace) -> Result<Vec<Value>> {
+    let main = repo::open(&ws.layout.main_worktree)?;
+    let default = main.find_reference("refs/remotes/origin/HEAD").ok().and_then(|head| {
+        let target = head.target().try_name()?.as_bstr().to_string();
+        target.strip_prefix("refs/remotes/origin/").map(str::to_owned)
+    });
+    let branch = main.head_name()?.map(|name| name.shorten().to_string());
+    let changes = repo::has_changes(&main)?;
+    let mut found = Vec::new();
+    if changes || branch.is_none() || branch != default {
+        found.push(json!({ "path": ws.layout.main_worktree, "branch": branch, "changes": changes }));
+    }
+    let slots_root = ws.slots_root();
+    for worktree in main.worktrees()? {
+        let path = worktree.base()?;
+        if path.starts_with(&slots_root) {
+            continue;
+        }
+        let branch = worktree
+            .into_repo_with_possibly_inaccessible_worktree()
+            .ok()
+            .and_then(|repo| repo.head_name().ok().flatten())
+            .map(|name| name.shorten().to_string());
+        found.push(json!({ "path": path, "branch": branch }));
+    }
+    Ok(found)
 }
 
 pub(crate) fn lock_held(lock_path: &Path) -> bool {

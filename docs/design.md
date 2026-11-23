@@ -48,7 +48,7 @@ push 判定が読む private policy の path は repository に置かず、user 
 | command | 前景で行うこと | 想定の費用 |
 |---|---|---|
 | `wl begin <task> [--target <branch>]` | 空いている slot を選び、base から topic branch を作って切り替える。base は fetch せず、最後に fetch した `origin/HEAD`（`--target` があれば `origin/<branch>`）を使う。`--target` の branch が、その task の統合先になる。空きの slot が base にあれば ref を動かすだけで、file は書かない。空きが無くなったら、次の slot の準備を background で始める | runner で p90 46〜48 ms。空きが無いときだけ 0.3〜0.5 s（推定、まれ） |
-| `wl status [TASK] [--finish ID]` | task の state file と未読の通知を読む。`--finish ID` を指定すると退役後もその実行の結果を返す | runner で p90 12〜17 ms |
+| `wl status [TASK] [--finish ID]` | task の state file と未読の通知を読む。`--finish ID` を指定すると退役後もその実行の結果を返す。TASK も `--finish` も無いときは、どの task も持たない作業を `unmanaged` に並べる。既定 branch 以外にいるか、追跡 file に変更がある main checkout と、slots の folder の外にある worktree で、どの command も退役させないので残り続ける（#10） | runner で p90 12〜17 ms。`unmanaged` の確認で Windows controller の実測は p90 18 ms から 28〜31 ms |
 | `wl finish [--retire]` | HEAD を確定した commit として記録し、実行 `id` と受付順の file を作り、worker を起動して戻る。checkout に未 commit の変更や未追跡の file があるかは、Windows で約 20 ms かかるので worker が調べ、統合の知らせに添える | 数 ms と process の起動 |
 | `wl hold` / `wl release-hold` | state file を書き換える | 数 ms |
 | `wl retire` | 明示の退役。slot を空きに戻す | 差分の書込み |
