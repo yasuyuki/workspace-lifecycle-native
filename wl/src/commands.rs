@@ -464,10 +464,11 @@ fn unmanaged(ws: &Workspace) -> Result<Vec<Value>> {
     if changes || branch.is_none() || branch != default {
         found.push(json!({ "path": ws.layout.main_worktree, "branch": branch, "changes": changes }));
     }
-    let slots_root = ws.slots_root();
+    // Git records a worktree by its long path, while the repository may be named by a Windows short (8.3) one.
+    let slots_root = std::fs::canonicalize(ws.slots_root()).ok();
     for worktree in main.worktrees()? {
         let path = worktree.base()?;
-        if path.starts_with(&slots_root) {
+        if slots_root.as_ref().is_some_and(|root| std::fs::canonicalize(&path).is_ok_and(|p| p.starts_with(root))) {
             continue;
         }
         let branch = worktree

@@ -273,7 +273,8 @@ fn status_reports_work_that_no_task_owns() {
     assert_eq!(unmanaged.len(), 2, "{status}");
     assert_eq!(unmanaged[0]["branch"], "by-hand");
     assert_eq!(unmanaged[0]["changes"], true);
-    assert_eq!(PathBuf::from(unmanaged[0]["path"].as_str().unwrap()), f.main);
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap();
+    assert_eq!(canonical(Path::new(unmanaged[0]["path"].as_str().unwrap())), canonical(&f.main));
     assert_eq!(unmanaged[1]["branch"], "elsewhere");
     assert_eq!(PathBuf::from(unmanaged[1]["path"].as_str().unwrap()).file_name().unwrap(), "foreign");
 }
