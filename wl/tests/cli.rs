@@ -3,8 +3,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+/// Gives git, and the git that `wl` starts, the same configuration: no system or user file. Otherwise the machine's
+/// files reach only the test's own git, since `wl` runs with a home of its own, and a system `core.autocrlf=true`
+/// (Git for Windows' default) makes a slot that `wl` checked out look modified.
+fn same_git_config(command: &mut Command) -> &mut Command {
+    command.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", if cfg!(windows) { "NUL" } else { "/dev/null" })
+}
+
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").arg("-C").arg(dir).args(args)
+    let out = same_git_config(&mut Command::new("git")).arg("-C").arg(dir).args(args)
         .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t")
         .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t")
         .output().unwrap();
@@ -15,7 +22,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
 fn wl(repo: &Path, args: &[&str]) -> Value {
     let home = repo.parent().unwrap().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_wl")).arg("--repo").arg(repo).args(args)
+    let out = same_git_config(&mut Command::new(env!("CARGO_BIN_EXE_wl"))).arg("--repo").arg(repo).args(args)
         .env("HOME", &home).env("USERPROFILE", &home).env("XDG_CONFIG_HOME", &home)
         .output().unwrap();
     serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("not json: {}", String::from_utf8_lossy(&out.stdout)))
