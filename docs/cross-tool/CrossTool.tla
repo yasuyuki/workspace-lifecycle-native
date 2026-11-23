@@ -42,6 +42,20 @@ WlBegin ==
   /\ target' \in {"default", "feature"}
   /\ UNCHANGED <<switched, inTarget, inDefault, session, issue, legacy, pushMoved, bindingRemoved>>
 
+\* Another task, such as a wl task merging the legacy topic, brings the
+\* legacy task's work to the default branch.
+LegacyWorkReachesDefault ==
+  /\ owner = "legacy" /\ phase = "working" /\ ~inDefault
+  /\ inTarget' = TRUE /\ inDefault' = TRUE
+  /\ UNCHANGED <<switched, owner, phase, target, session, issue, legacy, pushMoved, bindingRemoved>>
+
+\* No legacy entry ends the task (a primary checkout, or an owner receipt
+\* whose completion can no longer run); it stays recorded with no work of its own.
+LegacyStranded ==
+  /\ owner = "legacy" /\ phase = "working" /\ inDefault
+  /\ phase' = "stranded"
+  /\ UNCHANGED <<switched, owner, target, inTarget, inDefault, session, issue, legacy, pushMoved, bindingRemoved>>
+
 \* The one modeled task represents the legacy drain check.
 LegacyTaskActive == owner = "legacy" /\ phase \in Active
 
@@ -141,6 +155,7 @@ CloseIssue ==
 
 Next ==
   \/ RulesSwitch \/ LegacyBegin \/ LegacyFinish \/ WlBegin
+  \/ LegacyWorkReachesDefault \/ LegacyStranded
   \/ MovePushDecision \/ RemoveWorkspaceBinding \/ LegacyUninstall
   \/ Launch \/ SessionEnds
   \/ WlFinish \/ PreflightPush \/ PreflightStops
@@ -156,4 +171,5 @@ NoSessionInReusedSlot == ~(phase = "reused" /\ session = "running")
 LegacyOutlivesDependents ==
   (LegacyTaskActive \/ ~pushMoved \/ ~bindingRemoved) => legacy = "installed"
 SessionCanStart == session # "blocked"
+NoLegacyWorkLostAtRemoval == (legacy = "removed" /\ owner = "legacy") => inDefault
 ====

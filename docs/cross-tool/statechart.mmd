@@ -9,22 +9,24 @@ stateDiagram-v2
   s4: push 判定を移行済み
   s5: legacy task が完了
   s6: wl task を開始済み
-  s7: finish 受付済み
-  s8: push 判定を移行し binding を解除済み
-  s9: Issue を close 済み
-  s10: wl task の session が作業中
-  s11: 要対応
-  s12: legacy install 撤去済み
-  s13: topic を push 済み
-  s14: 統合先で検証済み
-  s15: 統合先へ push 済み
-  s16: Target integration 済み
-  s17: Default integration 済み
-  s18: Target integration 済み#12289;session は作業中
-  s19: slot は空き#12289;default に未到達
-  s20: default 到達後に退役済み
-  s21: slot 再利用中#12289;default に未到達
-  s22: default 到達済みの slot を再利用中
+  s7: legacy task の成果が default に届いた
+  s8: finish 受付済み
+  s9: push 判定を移行し binding を解除済み
+  s10: Issue を close 済み
+  s11: legacy の入口で終えられない task が残る
+  s12: wl task の session が作業中
+  s13: 要対応
+  s14: legacy install 撤去済み
+  s15: topic を push 済み
+  s16: 統合先で検証済み
+  s17: 統合先へ push 済み
+  s18: Target integration 済み
+  s19: Default integration 済み
+  s20: Target integration 済み#12289;session は作業中
+  s21: slot は空き#12289;default に未到達
+  s22: default 到達後に退役済み
+  s23: slot 再利用中#12289;default に未到達
+  s24: default 到達済みの slot を再利用中
   [*] --> s0
   s0 --> s1: agent-rules が入口を wl に切り替える
   s0 --> s2: legacy task を開始する
@@ -32,43 +34,47 @@ stateDiagram-v2
   s1 --> s4: 新しい push 判定に切り替える
   s1 --> s6: wl begin
   s2 --> s5: legacy task を統合して退役する
-  s3 --> s8: 新しい push 判定に切り替える
+  s2 --> s7: 別の task が legacy task の成果を default に届ける
+  s3 --> s9: 新しい push 判定に切り替える
   s3 --> s6: wl begin
-  s4 --> s8: agent-runtime の binding を外す
+  s4 --> s9: agent-runtime の binding を外す
   s4 --> s6: wl begin
-  s5 --> s9: Default integration を確認し Issue を close する
-  s6 --> s7: wl finish
-  s6 --> s10: agent-runtime で session を起動する
-  s7 --> s11: push 判定が通らず停止する
-  s7 --> s13: push 判定が許可し topic を push する
-  s8 --> s12: legacy task が尽き#12289;二つの移行も済んで撤去する
-  s8 --> s6: wl begin
-  s10 --> s7: wl finish --retire を呼び task の作業を終了する or wl finish
-  s10 --> s6: session が task の作業を終了する
-  s11 --> s7: wl finish or wl finish --retire を呼び task の作業を終了する
-  s12 --> s6: wl begin
-  s13 --> s11: topic check または検証が失敗する
-  s13 --> s14: topic check と検証が通る
-  s14 --> s11: push 判定が通らず停止する
-  s14 --> s15: 統合先へ push する
-  s5 --> s12: legacy task が尽き#12289;二つの移行も済んで撤去する
-  s12 --> s9: Default integration を確認し Issue を close する
-  s15 --> s16: 統合先の check が通る
-  s15 --> s11: 統合先の check が失敗する
-  s15 --> s17: 統合先の check が通る
-  s16 --> s17: feature branch の成果が default に届く
-  s16 --> s19: 作業終了後に slot を退役する
-  s17 --> s9: Default integration を確認し Issue を close する
-  s17 --> s20: 作業終了後に slot を退役する
-  s11 --> s19: 作業終了後に slot を退役する
-  s11 --> s20: 作業終了後に slot を退役する
-  s15 --> s18: 統合先の check が通る
-  s18 --> s16: session が task の作業を終了する
-  s18 --> s17: session が task の作業を終了する
-  s18 --> s9: Default integration を確認し Issue を close する
-  s19 --> s20: feature branch の成果が default に届く
-  s19 --> s21: 次の wl begin が同じ slot を使う
-  s20 --> s9: Default integration を確認し Issue を close する
-  s20 --> s22: 次の wl begin が同じ slot を使う
+  s5 --> s10: Default integration を確認し Issue を close する
+  s6 --> s8: wl finish
+  s6 --> s12: agent-runtime で session を起動する
+  s7 --> s5: legacy task を統合して退役する
+  s7 --> s11: legacy の入口では終えられないまま残る
+  s8 --> s13: push 判定が通らず停止する
+  s8 --> s15: push 判定が許可し topic を push する
+  s9 --> s14: 作業を残す legacy task が無く#12289;二つの移行も済んで撤去する
+  s9 --> s6: wl begin
+  s12 --> s8: wl finish --retire を呼び task の作業を終了する or wl finish
+  s12 --> s6: session が task の作業を終了する
+  s13 --> s8: wl finish or wl finish --retire を呼び task の作業を終了する
+  s14 --> s6: wl begin
+  s15 --> s13: topic check または検証が失敗する
+  s15 --> s16: topic check と検証が通る
+  s16 --> s13: push 判定が通らず停止する
+  s16 --> s17: 統合先へ push する
+  s5 --> s14: 作業を残す legacy task が無く#12289;二つの移行も済んで撤去する
+  s14 --> s10: Default integration を確認し Issue を close する
+  s11 --> s14: 作業を残す legacy task が無く#12289;二つの移行も済んで撤去する
+  s17 --> s18: 統合先の check が通る
+  s17 --> s13: 統合先の check が失敗する
+  s17 --> s19: 統合先の check が通る
+  s18 --> s19: feature branch の成果が default に届く
+  s18 --> s21: 作業終了後に slot を退役する
+  s19 --> s10: Default integration を確認し Issue を close する
+  s19 --> s22: 作業終了後に slot を退役する
+  s13 --> s21: 作業終了後に slot を退役する
+  s13 --> s22: 作業終了後に slot を退役する
+  s17 --> s20: 統合先の check が通る
+  s20 --> s18: session が task の作業を終了する
+  s20 --> s19: session が task の作業を終了する
+  s20 --> s10: Default integration を確認し Issue を close する
   s21 --> s22: feature branch の成果が default に届く
-  s22 --> s9: Default integration を確認し Issue を close する
+  s21 --> s23: 次の wl begin が同じ slot を使う
+  s22 --> s10: Default integration を確認し Issue を close する
+  s22 --> s24: 次の wl begin が同じ slot を使う
+  s23 --> s24: feature branch の成果が default に届く
+  s24 --> s10: Default integration を確認し Issue を close する
